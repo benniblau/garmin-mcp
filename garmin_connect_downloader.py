@@ -9,9 +9,11 @@ the actual Garmin Connect API response structure.
 Author: Generated with Claude Code
 """
 
+import json
 import os
 import sqlite3
-from datetime import datetime, timezone
+import time
+from datetime import date, datetime, timedelta, timezone
 from typing import Dict, Any, List
 from dotenv import load_dotenv
 
@@ -209,6 +211,133 @@ class GarminConnectDownloader:
         CREATE INDEX IF NOT EXISTS idx_activities_distance ON activities(distance);
         CREATE INDEX IF NOT EXISTS idx_activities_duration ON activities(duration);
         CREATE INDEX IF NOT EXISTS idx_activities_created ON activities(created_at);
+
+        -- Health & Wellness tables
+        CREATE TABLE IF NOT EXISTS daily_sleep (
+            calendar_date TEXT PRIMARY KEY,
+            sleep_time_seconds INTEGER, nap_time_seconds INTEGER,
+            deep_sleep_seconds INTEGER, light_sleep_seconds INTEGER,
+            rem_sleep_seconds INTEGER, awake_sleep_seconds INTEGER,
+            unmeasurable_sleep_seconds INTEGER,
+            sleep_start_timestamp_gmt BIGINT, sleep_end_timestamp_gmt BIGINT,
+            sleep_start_timestamp_local BIGINT, sleep_end_timestamp_local BIGINT,
+            device_rem_capable BOOLEAN,
+            sleep_score_overall INTEGER, sleep_score_total_duration INTEGER,
+            sleep_score_stress INTEGER, sleep_score_awake_count INTEGER,
+            sleep_score_rem_percentage INTEGER, sleep_score_restlessness INTEGER,
+            sleep_score_light_percentage INTEGER, sleep_score_deep_percentage INTEGER,
+            average_spo2 REAL, lowest_spo2 INTEGER, highest_spo2 INTEGER,
+            average_spo2_hr_sleep REAL,
+            average_respiration REAL, lowest_respiration REAL, highest_respiration REAL,
+            avg_sleep_stress REAL,
+            sleep_score_feedback TEXT, sleep_score_insight TEXT,
+            synced_at TEXT DEFAULT (datetime('now'))
+        );
+        CREATE TABLE IF NOT EXISTS daily_stress (
+            calendar_date TEXT PRIMARY KEY,
+            overall_stress_level INTEGER,
+            rest_stress_duration INTEGER, low_stress_duration INTEGER,
+            medium_stress_duration INTEGER, high_stress_duration INTEGER,
+            synced_at TEXT DEFAULT (datetime('now'))
+        );
+        CREATE TABLE IF NOT EXISTS daily_hrv (
+            calendar_date TEXT PRIMARY KEY,
+            weekly_avg INTEGER, last_night_avg INTEGER, last_night_5_min_high INTEGER,
+            baseline_low_upper INTEGER, baseline_balanced_low INTEGER,
+            baseline_balanced_upper INTEGER, baseline_marker_value REAL,
+            status TEXT, feedback_phrase TEXT,
+            synced_at TEXT DEFAULT (datetime('now'))
+        );
+        CREATE TABLE IF NOT EXISTS daily_steps (
+            calendar_date TEXT PRIMARY KEY,
+            total_steps INTEGER, total_distance INTEGER, step_goal INTEGER,
+            synced_at TEXT DEFAULT (datetime('now'))
+        );
+        CREATE TABLE IF NOT EXISTS daily_hydration (
+            calendar_date TEXT PRIMARY KEY,
+            value_in_ml REAL, goal_in_ml REAL,
+            synced_at TEXT DEFAULT (datetime('now'))
+        );
+        CREATE TABLE IF NOT EXISTS daily_intensity_minutes (
+            calendar_date TEXT PRIMARY KEY,
+            weekly_goal INTEGER, moderate_value INTEGER, vigorous_value INTEGER,
+            synced_at TEXT DEFAULT (datetime('now'))
+        );
+        CREATE TABLE IF NOT EXISTS body_composition (
+            sample_pk INTEGER PRIMARY KEY,
+            calendar_date TEXT, weight REAL, bmi REAL, body_fat REAL,
+            body_water REAL, bone_mass INTEGER, muscle_mass INTEGER,
+            physique_rating REAL, visceral_fat REAL, metabolic_age INTEGER,
+            source_type TEXT, timestamp_gmt BIGINT,
+            synced_at TEXT DEFAULT (datetime('now'))
+        );
+        CREATE TABLE IF NOT EXISTS daily_body_battery (
+            calendar_date TEXT PRIMARY KEY,
+            max_stress_level INTEGER, avg_stress_level INTEGER,
+            raw_json TEXT, synced_at TEXT DEFAULT (datetime('now'))
+        );
+        CREATE TABLE IF NOT EXISTS daily_heart_rate (
+            calendar_date TEXT PRIMARY KEY,
+            resting_heart_rate INTEGER, max_heart_rate INTEGER, min_heart_rate INTEGER,
+            raw_json TEXT, synced_at TEXT DEFAULT (datetime('now'))
+        );
+        CREATE TABLE IF NOT EXISTS daily_respiration (
+            calendar_date TEXT PRIMARY KEY,
+            avg_waking_respiration REAL, highest_respiration REAL, lowest_respiration REAL,
+            raw_json TEXT, synced_at TEXT DEFAULT (datetime('now'))
+        );
+        CREATE TABLE IF NOT EXISTS daily_spo2 (
+            calendar_date TEXT PRIMARY KEY,
+            avg_spo2 REAL, lowest_spo2 REAL, latest_spo2 REAL,
+            raw_json TEXT, synced_at TEXT DEFAULT (datetime('now'))
+        );
+        CREATE TABLE IF NOT EXISTS daily_floors (
+            calendar_date TEXT PRIMARY KEY,
+            total_floors INTEGER, floor_goal INTEGER,
+            raw_json TEXT, synced_at TEXT DEFAULT (datetime('now'))
+        );
+        CREATE TABLE IF NOT EXISTS training_readiness (
+            calendar_date TEXT PRIMARY KEY,
+            score INTEGER, level TEXT,
+            raw_json TEXT, synced_at TEXT DEFAULT (datetime('now'))
+        );
+        CREATE TABLE IF NOT EXISTS training_status (
+            calendar_date TEXT PRIMARY KEY,
+            raw_json TEXT, synced_at TEXT DEFAULT (datetime('now'))
+        );
+        CREATE TABLE IF NOT EXISTS blood_pressure (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            calendar_date TEXT, systolic INTEGER, diastolic INTEGER,
+            pulse INTEGER, timestamp_gmt TEXT, notes TEXT, source_type TEXT,
+            synced_at TEXT DEFAULT (datetime('now'))
+        );
+        CREATE TABLE IF NOT EXISTS daily_max_metrics (
+            calendar_date TEXT PRIMARY KEY,
+            raw_json TEXT, synced_at TEXT DEFAULT (datetime('now'))
+        );
+        CREATE TABLE IF NOT EXISTS fitness_age (
+            calendar_date TEXT PRIMARY KEY,
+            raw_json TEXT, synced_at TEXT DEFAULT (datetime('now'))
+        );
+        CREATE TABLE IF NOT EXISTS race_predictions (
+            calendar_date TEXT PRIMARY KEY,
+            raw_json TEXT, synced_at TEXT DEFAULT (datetime('now'))
+        );
+        CREATE TABLE IF NOT EXISTS endurance_score (
+            calendar_date TEXT PRIMARY KEY,
+            raw_json TEXT, synced_at TEXT DEFAULT (datetime('now'))
+        );
+        CREATE TABLE IF NOT EXISTS hill_score (
+            calendar_date TEXT PRIMARY KEY,
+            raw_json TEXT, synced_at TEXT DEFAULT (datetime('now'))
+        );
+        CREATE TABLE IF NOT EXISTS devices (
+            device_id BIGINT PRIMARY KEY,
+            device_name TEXT, device_type TEXT,
+            raw_json TEXT, synced_at TEXT DEFAULT (datetime('now'))
+        );
+        CREATE INDEX IF NOT EXISTS idx_body_composition_date ON body_composition(calendar_date);
+        CREATE INDEX IF NOT EXISTS idx_blood_pressure_date ON blood_pressure(calendar_date);
         """
         
         try:
@@ -735,6 +864,508 @@ class GarminConnectDownloader:
         print(f"🎉 Total activities downloaded: {total_downloaded}")
         return total_downloaded
 
+    # =========================================================================
+    # Health & Wellness Data Download Methods
+    # =========================================================================
+
+    def _get_date_range(self):
+        """Get start/end dates from config."""
+        start_date_str = os.getenv('GARMIN_START_DATE')
+        if start_date_str:
+            start = datetime.strptime(start_date_str, '%Y-%m-%d').date()
+        else:
+            start = (datetime.now() - timedelta(days=730)).date()
+        end = date.today()
+        return start, end
+
+    def _get_display_name(self):
+        """Get the Garmin display name for API calls that require it."""
+        if not hasattr(self, '_display_name'):
+            try:
+                profile = garth.connectapi('/userprofile-service/socialProfile')
+                self._display_name = profile.get('displayName', '')
+            except Exception:
+                self._display_name = ''
+        return self._display_name
+
+    def _upsert(self, table, data, pk='calendar_date'):
+        """Generic upsert helper for health data."""
+        if not data:
+            return
+        conn = sqlite3.connect(self.db_path)
+        try:
+            columns = ', '.join(data.keys())
+            placeholders = ', '.join(['?' for _ in data])
+            conn.execute(
+                f"INSERT OR REPLACE INTO {table} ({columns}) VALUES ({placeholders})",
+                tuple(data.values())
+            )
+            conn.commit()
+        finally:
+            conn.close()
+
+    def _day_by_day(self, label, start, end, fetch_fn):
+        """Iterate day-by-day, calling fetch_fn(current_date) for each day."""
+        current = start
+        count = 0
+        total = (end - start).days + 1
+        while current <= end:
+            try:
+                fetch_fn(current)
+                count += 1
+            except Exception as e:
+                err = str(e)
+                if '429' in err or 'Too Many' in err:
+                    print(f"  ⏳ Rate limited, waiting 60s...")
+                    time.sleep(60)
+                    try:
+                        fetch_fn(current)
+                        count += 1
+                    except Exception:
+                        pass
+                # Silently skip days with no data
+            if count % 50 == 0 and count > 0:
+                print(f"  📝 {label}: {count}/{total} days...")
+            current += timedelta(days=1)
+            time.sleep(0.1)  # Be gentle with the API
+        print(f"  ✅ {label}: {count} days synced")
+
+    def download_health_data(self):
+        """Download all health and wellness data."""
+        start, end = self._get_date_range()
+        days = (end - start).days + 1
+        print(f"\n📥 Downloading health data from {start} to {end} ({days} days)...")
+
+        # --- Garth Stats (bulk range queries) ---
+        self._download_daily_steps(start, end, days)
+        self._download_daily_stress(start, end, days)
+        self._download_daily_hrv(start, end, days)
+        self._download_daily_hydration(start, end, days)
+        self._download_daily_intensity_minutes(start, end, days)
+
+        # --- Garth Data (day-by-day) ---
+        self._download_sleep_data(start, end)
+        self._download_body_composition(start, end, days)
+        self._download_body_battery(start, end)
+
+        # --- Garmin Connect API (day-by-day) ---
+        self._download_heart_rate(start, end)
+        self._download_respiration(start, end)
+        self._download_spo2(start, end)
+        self._download_floors(start, end)
+        self._download_training_readiness(start, end)
+        self._download_training_status(start, end)
+        self._download_max_metrics(start, end)
+        self._download_fitness_age(start, end)
+        self._download_endurance_score(start, end)
+        self._download_hill_score(start, end)
+        self._download_race_predictions(start, end)
+        self._download_blood_pressure(start, end)
+        self._download_devices()
+
+        print(f"\n🎉 Health data download complete!")
+
+    # -- Garth Stats methods (bulk) --
+
+    def _download_daily_steps(self, start, end, days):
+        from garth.stats import DailySteps
+        print(f"  📊 Downloading daily steps...")
+        try:
+            items = DailySteps.list(end, period=days)
+            for item in items:
+                self._upsert('daily_steps', {
+                    'calendar_date': str(item.calendar_date),
+                    'total_steps': item.total_steps,
+                    'total_distance': item.total_distance,
+                    'step_goal': item.step_goal,
+                })
+            print(f"  ✅ Daily steps: {len(items)} days synced")
+        except Exception as e:
+            print(f"  ⚠️ Daily steps failed: {e}")
+
+    def _download_daily_stress(self, start, end, days):
+        from garth.stats import DailyStress
+        print(f"  📊 Downloading daily stress...")
+        try:
+            items = DailyStress.list(end, period=days)
+            for item in items:
+                self._upsert('daily_stress', {
+                    'calendar_date': str(item.calendar_date),
+                    'overall_stress_level': item.overall_stress_level,
+                    'rest_stress_duration': item.rest_stress_duration,
+                    'low_stress_duration': item.low_stress_duration,
+                    'medium_stress_duration': item.medium_stress_duration,
+                    'high_stress_duration': item.high_stress_duration,
+                })
+            print(f"  ✅ Daily stress: {len(items)} days synced")
+        except Exception as e:
+            print(f"  ⚠️ Daily stress failed: {e}")
+
+    def _download_daily_hrv(self, start, end, days):
+        from garth.stats import DailyHRV
+        print(f"  📊 Downloading daily HRV...")
+        try:
+            items = DailyHRV.list(end, period=days)
+            for item in items:
+                baseline = item.baseline
+                self._upsert('daily_hrv', {
+                    'calendar_date': str(item.calendar_date),
+                    'weekly_avg': item.weekly_avg,
+                    'last_night_avg': item.last_night_avg,
+                    'last_night_5_min_high': item.last_night_5_min_high,
+                    'baseline_low_upper': baseline.low_upper if baseline else None,
+                    'baseline_balanced_low': baseline.balanced_low if baseline else None,
+                    'baseline_balanced_upper': baseline.balanced_upper if baseline else None,
+                    'baseline_marker_value': baseline.marker_value if baseline else None,
+                    'status': item.status,
+                    'feedback_phrase': item.feedback_phrase,
+                })
+            print(f"  ✅ Daily HRV: {len(items)} days synced")
+        except Exception as e:
+            print(f"  ⚠️ Daily HRV failed: {e}")
+
+    def _download_daily_hydration(self, start, end, days):
+        from garth.stats import DailyHydration
+        print(f"  📊 Downloading daily hydration...")
+        try:
+            items = DailyHydration.list(end, period=days)
+            for item in items:
+                self._upsert('daily_hydration', {
+                    'calendar_date': str(item.calendar_date),
+                    'value_in_ml': item.value_in_ml,
+                    'goal_in_ml': item.goal_in_ml,
+                })
+            print(f"  ✅ Daily hydration: {len(items)} days synced")
+        except Exception as e:
+            print(f"  ⚠️ Daily hydration failed: {e}")
+
+    def _download_daily_intensity_minutes(self, start, end, days):
+        from garth.stats import DailyIntensityMinutes
+        print(f"  📊 Downloading daily intensity minutes...")
+        try:
+            items = DailyIntensityMinutes.list(end, period=days)
+            for item in items:
+                self._upsert('daily_intensity_minutes', {
+                    'calendar_date': str(item.calendar_date),
+                    'weekly_goal': item.weekly_goal,
+                    'moderate_value': item.moderate_value,
+                    'vigorous_value': item.vigorous_value,
+                })
+            print(f"  ✅ Daily intensity minutes: {len(items)} days synced")
+        except Exception as e:
+            print(f"  ⚠️ Daily intensity minutes failed: {e}")
+
+    # -- Garth Data methods (day-by-day) --
+
+    def _download_sleep_data(self, start, end):
+        from garth.data import SleepData
+        print(f"  📊 Downloading sleep data...")
+        def fetch(d):
+            sleep = SleepData.get(d)
+            if sleep is None:
+                return
+            dto = sleep.daily_sleep_dto
+            scores = dto.sleep_scores
+            self._upsert('daily_sleep', {
+                'calendar_date': str(dto.calendar_date),
+                'sleep_time_seconds': dto.sleep_time_seconds,
+                'nap_time_seconds': dto.nap_time_seconds,
+                'deep_sleep_seconds': dto.deep_sleep_seconds,
+                'light_sleep_seconds': dto.light_sleep_seconds,
+                'rem_sleep_seconds': dto.rem_sleep_seconds,
+                'awake_sleep_seconds': dto.awake_sleep_seconds,
+                'unmeasurable_sleep_seconds': dto.unmeasurable_sleep_seconds,
+                'sleep_start_timestamp_gmt': dto.sleep_start_timestamp_gmt,
+                'sleep_end_timestamp_gmt': dto.sleep_end_timestamp_gmt,
+                'sleep_start_timestamp_local': dto.sleep_start_timestamp_local,
+                'sleep_end_timestamp_local': dto.sleep_end_timestamp_local,
+                'device_rem_capable': dto.device_rem_capable,
+                'sleep_score_overall': scores.overall.value if scores and scores.overall else None,
+                'sleep_score_total_duration': scores.total_duration.value if scores and scores.total_duration else None,
+                'sleep_score_stress': scores.stress.value if scores and scores.stress else None,
+                'sleep_score_awake_count': scores.awake_count.value if scores and scores.awake_count else None,
+                'sleep_score_rem_percentage': scores.rem_percentage.value if scores and scores.rem_percentage else None,
+                'sleep_score_restlessness': scores.restlessness.value if scores and scores.restlessness else None,
+                'sleep_score_light_percentage': scores.light_percentage.value if scores and scores.light_percentage else None,
+                'sleep_score_deep_percentage': scores.deep_percentage.value if scores and scores.deep_percentage else None,
+                'average_spo2': dto.average_sp_o2_value,
+                'lowest_spo2': dto.lowest_sp_o2_value,
+                'highest_spo2': dto.highest_sp_o2_value,
+                'average_spo2_hr_sleep': dto.average_sp_o2_hr_sleep,
+                'average_respiration': dto.average_respiration_value,
+                'lowest_respiration': dto.lowest_respiration_value,
+                'highest_respiration': dto.highest_respiration_value,
+                'avg_sleep_stress': dto.avg_sleep_stress,
+                'sleep_score_feedback': dto.sleep_score_feedback,
+                'sleep_score_insight': dto.sleep_score_insight,
+            })
+        self._day_by_day("Sleep data", start, end, fetch)
+
+    def _download_body_composition(self, start, end, days):
+        from garth.data import WeightData
+        print(f"  📊 Downloading body composition...")
+        try:
+            items = WeightData.list(end, days=days)
+            for item in items:
+                self._upsert('body_composition', {
+                    'sample_pk': item.sample_pk,
+                    'calendar_date': str(item.calendar_date),
+                    'weight': item.weight,
+                    'bmi': item.bmi,
+                    'body_fat': item.body_fat,
+                    'body_water': item.body_water,
+                    'bone_mass': item.bone_mass,
+                    'muscle_mass': item.muscle_mass,
+                    'physique_rating': item.physique_rating,
+                    'visceral_fat': item.visceral_fat,
+                    'metabolic_age': item.metabolic_age,
+                    'source_type': item.source_type,
+                    'timestamp_gmt': item.timestamp_gmt,
+                })
+            print(f"  ✅ Body composition: {len(items)} entries synced")
+        except Exception as e:
+            print(f"  ⚠️ Body composition failed: {e}")
+
+    def _download_body_battery(self, start, end):
+        from garth.data.body_battery import DailyBodyBatteryStress
+        print(f"  📊 Downloading body battery...")
+        def fetch(d):
+            data = DailyBodyBatteryStress.get(d)
+            if data is None:
+                return
+            self._upsert('daily_body_battery', {
+                'calendar_date': str(data.calendar_date),
+                'max_stress_level': data.max_stress_level,
+                'avg_stress_level': data.avg_stress_level,
+                'raw_json': json.dumps({
+                    'stress_chart_value_offset': data.stress_chart_value_offset,
+                    'stress_chart_y_axis_origin': data.stress_chart_y_axis_origin,
+                }),
+            })
+        self._day_by_day("Body battery", start, end, fetch)
+
+    # -- Garmin Connect API methods (day-by-day raw) --
+
+    def _download_heart_rate(self, start, end):
+        display_name = self._get_display_name()
+        print(f"  📊 Downloading heart rate...")
+        def fetch(d):
+            data = garth.connectapi(
+                f'/wellness-service/wellness/dailyHeartRate/{display_name}',
+                params={'date': str(d)}
+            )
+            if not data:
+                return
+            self._upsert('daily_heart_rate', {
+                'calendar_date': str(d),
+                'resting_heart_rate': data.get('restingHeartRate'),
+                'max_heart_rate': data.get('maxHeartRate'),
+                'min_heart_rate': data.get('minHeartRate'),
+                'raw_json': json.dumps(data),
+            })
+        self._day_by_day("Heart rate", start, end, fetch)
+
+    def _download_respiration(self, start, end):
+        print(f"  📊 Downloading respiration...")
+        def fetch(d):
+            data = garth.connectapi(f'/wellness-service/wellness/daily/respiration/{d}')
+            if not data:
+                return
+            self._upsert('daily_respiration', {
+                'calendar_date': str(d),
+                'avg_waking_respiration': data.get('avgWakingRespirationValue'),
+                'highest_respiration': data.get('highestRespirationValue'),
+                'lowest_respiration': data.get('lowestRespirationValue'),
+                'raw_json': json.dumps(data),
+            })
+        self._day_by_day("Respiration", start, end, fetch)
+
+    def _download_spo2(self, start, end):
+        print(f"  📊 Downloading SpO2...")
+        def fetch(d):
+            data = garth.connectapi(f'/wellness-service/wellness/daily/spo2/{d}')
+            if not data:
+                return
+            self._upsert('daily_spo2', {
+                'calendar_date': str(d),
+                'avg_spo2': data.get('averageSpO2'),
+                'lowest_spo2': data.get('lowestSpO2'),
+                'latest_spo2': data.get('latestSpO2'),
+                'raw_json': json.dumps(data),
+            })
+        self._day_by_day("SpO2", start, end, fetch)
+
+    def _download_floors(self, start, end):
+        print(f"  📊 Downloading floors...")
+        def fetch(d):
+            data = garth.connectapi(f'/wellness-service/wellness/floorsChartData/daily/{d}')
+            if not data:
+                return
+            # Floors endpoint returns a list of floor entries
+            total = sum(entry.get('floorsAscended', 0) for entry in data) if isinstance(data, list) else 0
+            goal = data[0].get('floorGoal') if isinstance(data, list) and data else None
+            self._upsert('daily_floors', {
+                'calendar_date': str(d),
+                'total_floors': total,
+                'floor_goal': goal,
+                'raw_json': json.dumps(data),
+            })
+        self._day_by_day("Floors", start, end, fetch)
+
+    def _download_training_readiness(self, start, end):
+        print(f"  📊 Downloading training readiness...")
+        def fetch(d):
+            data = garth.connectapi(f'/metrics-service/metrics/trainingreadiness/{d}')
+            if not data:
+                return
+            self._upsert('training_readiness', {
+                'calendar_date': str(d),
+                'score': data.get('score'),
+                'level': data.get('level'),
+                'raw_json': json.dumps(data),
+            })
+        self._day_by_day("Training readiness", start, end, fetch)
+
+    def _download_training_status(self, start, end):
+        print(f"  📊 Downloading training status...")
+        def fetch(d):
+            data = garth.connectapi(f'/metrics-service/metrics/trainingstatus/aggregated/{d}')
+            if not data:
+                return
+            self._upsert('training_status', {
+                'calendar_date': str(d),
+                'raw_json': json.dumps(data),
+            })
+        self._day_by_day("Training status", start, end, fetch)
+
+    def _download_max_metrics(self, start, end):
+        print(f"  📊 Downloading max metrics...")
+        def fetch(d):
+            data = garth.connectapi(f'/metrics-service/metrics/maxmet/daily/{d}/{d}')
+            if not data:
+                return
+            self._upsert('daily_max_metrics', {
+                'calendar_date': str(d),
+                'raw_json': json.dumps(data),
+            })
+        self._day_by_day("Max metrics", start, end, fetch)
+
+    def _download_fitness_age(self, start, end):
+        print(f"  📊 Downloading fitness age...")
+        def fetch(d):
+            data = garth.connectapi(f'/fitnessage-service/fitnessage/{d}')
+            if not data:
+                return
+            self._upsert('fitness_age', {
+                'calendar_date': str(d),
+                'raw_json': json.dumps(data),
+            })
+        self._day_by_day("Fitness age", start, end, fetch)
+
+    def _download_endurance_score(self, start, end):
+        print(f"  📊 Downloading endurance score...")
+        def fetch(d):
+            data = garth.connectapi(
+                '/metrics-service/metrics/endurancescore',
+                params={'calendarDate': str(d)}
+            )
+            if not data:
+                return
+            self._upsert('endurance_score', {
+                'calendar_date': str(d),
+                'raw_json': json.dumps(data),
+            })
+        self._day_by_day("Endurance score", start, end, fetch)
+
+    def _download_hill_score(self, start, end):
+        print(f"  📊 Downloading hill score...")
+        def fetch(d):
+            data = garth.connectapi(
+                '/metrics-service/metrics/hillscore',
+                params={'calendarDate': str(d)}
+            )
+            if not data:
+                return
+            self._upsert('hill_score', {
+                'calendar_date': str(d),
+                'raw_json': json.dumps(data),
+            })
+        self._day_by_day("Hill score", start, end, fetch)
+
+    def _download_race_predictions(self, start, end):
+        display_name = self._get_display_name()
+        print(f"  📊 Downloading race predictions...")
+        def fetch(d):
+            data = garth.connectapi(
+                f'/metrics-service/metrics/racepredictions/daily/{display_name}',
+                params={'fromCalendarDate': str(d), 'toCalendarDate': str(d)}
+            )
+            if not data:
+                return
+            self._upsert('race_predictions', {
+                'calendar_date': str(d),
+                'raw_json': json.dumps(data),
+            })
+        self._day_by_day("Race predictions", start, end, fetch)
+
+    def _download_blood_pressure(self, start, end):
+        print(f"  📊 Downloading blood pressure...")
+        try:
+            data = garth.connectapi(
+                f'/bloodpressure-service/bloodpressure/range/{start}/{end}',
+                params={'includeAll': 'true'}
+            )
+            if not data:
+                print(f"  ✅ Blood pressure: no data")
+                return
+            readings = data if isinstance(data, list) else data.get('measurementSummaries', [])
+            count = 0
+            conn = sqlite3.connect(self.db_path)
+            try:
+                for reading in readings:
+                    if isinstance(reading, dict):
+                        conn.execute(
+                            """INSERT OR IGNORE INTO blood_pressure
+                               (calendar_date, systolic, diastolic, pulse,
+                                timestamp_gmt, notes, source_type)
+                               VALUES (?, ?, ?, ?, ?, ?, ?)""",
+                            (
+                                reading.get('measurementTimestampLocal', '')[:10],
+                                reading.get('systolic'),
+                                reading.get('diastolic'),
+                                reading.get('pulse'),
+                                reading.get('measurementTimestampGMT'),
+                                reading.get('notes'),
+                                reading.get('sourceType'),
+                            )
+                        )
+                        count += 1
+                conn.commit()
+            finally:
+                conn.close()
+            print(f"  ✅ Blood pressure: {count} readings synced")
+        except Exception as e:
+            print(f"  ⚠️ Blood pressure failed: {e}")
+
+    def _download_devices(self):
+        print(f"  📊 Downloading devices...")
+        try:
+            data = garth.connectapi('/device-service/deviceregistration/devices')
+            if not data:
+                print(f"  ✅ Devices: no data")
+                return
+            for device in data:
+                self._upsert('devices', {
+                    'device_id': device.get('deviceId'),
+                    'device_name': device.get('displayName') or device.get('deviceName'),
+                    'device_type': device.get('deviceTypeName'),
+                    'raw_json': json.dumps(device),
+                })
+            print(f"  ✅ Devices: {len(data)} synced")
+        except Exception as e:
+            print(f"  ⚠️ Devices failed: {e}")
+
+
 def main():
     """Main function to run the Garmin Connect downloader."""
     print("🏃 Garmin Connect Activities Downloader")
@@ -744,16 +1375,16 @@ def main():
     try:
         downloader = GarminConnectDownloader()
         
-        # Download recent activities (last 100)
-        # For all activities, use: downloader.download_all_activities()
+        # Download activities
         count = downloader.download_activities(limit=int(os.getenv('GARMIN_LIMIT')))
+
+        # Download health & wellness data
+        downloader.download_health_data()
 
         # Show summary
         downloader.print_summary()
-        
-        print(f"\n✅ Successfully processed {count} activities!")
-        print("\n💡 To download ALL activities, use:")
-        print("   downloader.download_all_activities()")
+
+        print(f"\n✅ Successfully processed {count} activities + health data!")
         
     except Exception as e:
         print(f"❌ Error: {e}")

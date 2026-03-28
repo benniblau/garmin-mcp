@@ -81,6 +81,18 @@ async def handle_list_resources() -> List[types.Resource]:
             name="Recent Activities",
             description="Most recent activities (last 30 days)",
             mimeType="application/json"
+        ),
+        types.Resource(
+            uri="garmin://health/summary",
+            name="Health Data Summary",
+            description="Overview of all available health data tables and their date ranges",
+            mimeType="application/json"
+        ),
+        types.Resource(
+            uri="garmin://health/recent",
+            name="Recent Health Snapshot",
+            description="Last 7 days of key health metrics (sleep, stress, HRV, steps, heart rate, body battery)",
+            mimeType="application/json"
         )
     ]
 
@@ -166,9 +178,52 @@ async def handle_read_resource(uri: str) -> str:
                 recent_activities = [serialize_row(row) for row in cursor.fetchall()]
                 return json.dumps(recent_activities, indent=2, default=str)
                 
+            elif uri == "garmin://health/summary":
+                health_tables = [
+                    'daily_sleep', 'daily_stress', 'daily_hrv', 'daily_steps',
+                    'daily_hydration', 'daily_intensity_minutes', 'body_composition',
+                    'daily_body_battery', 'daily_heart_rate', 'daily_respiration',
+                    'daily_spo2', 'daily_floors', 'training_readiness',
+                    'training_status', 'blood_pressure', 'daily_max_metrics',
+                    'fitness_age', 'race_predictions', 'endurance_score',
+                    'hill_score', 'devices'
+                ]
+                summary = {}
+                for table in health_tables:
+                    try:
+                        cursor.execute(f"SELECT COUNT(*) as cnt, MIN(calendar_date) as earliest, MAX(calendar_date) as latest FROM {table}")
+                        row = cursor.fetchone()
+                        summary[table] = {
+                            "count": row['cnt'],
+                            "earliest": row['earliest'],
+                            "latest": row['latest']
+                        }
+                    except Exception:
+                        summary[table] = {"count": 0, "earliest": None, "latest": None}
+                return json.dumps(summary, indent=2, default=str)
+
+            elif uri == "garmin://health/recent":
+                seven_days_ago = (datetime.now() - timedelta(days=7)).strftime('%Y-%m-%d')
+                result = {}
+                queries = {
+                    "sleep": "SELECT calendar_date, sleep_time_seconds/3600.0 as sleep_hours, deep_sleep_seconds/3600.0 as deep_hours, rem_sleep_seconds/3600.0 as rem_hours, sleep_score_overall, average_spo2, average_respiration FROM daily_sleep WHERE calendar_date >= ? ORDER BY calendar_date DESC",
+                    "stress": "SELECT * FROM daily_stress WHERE calendar_date >= ? ORDER BY calendar_date DESC",
+                    "hrv": "SELECT * FROM daily_hrv WHERE calendar_date >= ? ORDER BY calendar_date DESC",
+                    "steps": "SELECT * FROM daily_steps WHERE calendar_date >= ? ORDER BY calendar_date DESC",
+                    "heart_rate": "SELECT calendar_date, resting_heart_rate, max_heart_rate, min_heart_rate FROM daily_heart_rate WHERE calendar_date >= ? ORDER BY calendar_date DESC",
+                    "body_battery": "SELECT calendar_date, max_stress_level, avg_stress_level FROM daily_body_battery WHERE calendar_date >= ? ORDER BY calendar_date DESC",
+                }
+                for key, query in queries.items():
+                    try:
+                        cursor.execute(query, (seven_days_ago,))
+                        result[key] = [serialize_row(row) for row in cursor.fetchall()]
+                    except Exception:
+                        result[key] = []
+                return json.dumps(result, indent=2, default=str)
+
             else:
                 raise ValueError(f"Unknown resource: {uri}")
-    
+
     except sqlite3.Error as e:
         logger.error(f"Database error in read_resource: {e}")
         return json.dumps({"error": f"Database error: {str(e)}"})
@@ -306,7 +361,7 @@ async def handle_list_tools() -> List[types.Tool]:
         ),
         types.Tool(
             name="execute_sql",
-            description="Execute custom SQL query on the activities database",
+            description="Execute custom SQL query on the activities database. Available health tables: daily_sleep, daily_stress, daily_hrv, daily_steps, daily_hydration, daily_intensity_minutes, body_composition, daily_body_battery, daily_heart_rate, daily_respiration, daily_spo2, daily_floors, training_readiness, training_status, blood_pressure, daily_max_metrics, fitness_age, race_predictions, endurance_score, hill_score, devices. Use the daily_health_summary view for a combined overview.",
             inputSchema={
                 "type": "object",
                 "properties": {
@@ -321,6 +376,102 @@ async def handle_list_tools() -> List[types.Tool]:
                     }
                 },
                 "required": ["query"]
+            }
+        ),
+        types.Tool(
+            name="get_daily_health_summary",
+            description="Get a combined daily health summary for a specific date or date range, joining sleep, stress, HRV, steps, heart rate, body battery, hydration, and intensity minutes",
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "date": {
+                        "type": "string",
+                        "description": "Specific date (YYYY-MM-DD). If omitted, returns last 7 days."
+                    },
+                    "start_date": {
+                        "type": "string",
+                        "description": "Start of date range (YYYY-MM-DD)"
+                    },
+                    "end_date": {
+                        "type": "string",
+                        "description": "End of date range (YYYY-MM-DD)"
+                    },
+                    "limit": {
+                        "type": "integer",
+                        "description": "Max rows to return",
+                        "default": 30
+                    }
+                }
+            }
+        ),
+        types.Tool(
+            name="get_sleep_analysis",
+            description="Get detailed sleep data with scores, stages, SpO2, and respiration. Supports date range filtering and trend analysis.",
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "start_date": {
+                        "type": "string",
+                        "description": "Start date (YYYY-MM-DD)"
+                    },
+                    "end_date": {
+                        "type": "string",
+                        "description": "End date (YYYY-MM-DD)"
+                    },
+                    "limit": {
+                        "type": "integer",
+                        "description": "Max rows to return",
+                        "default": 30
+                    }
+                }
+            }
+        ),
+        types.Tool(
+            name="get_body_composition",
+            description="Get body composition/weight data with BMI, body fat %, muscle mass, etc.",
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "start_date": {
+                        "type": "string",
+                        "description": "Start date (YYYY-MM-DD)"
+                    },
+                    "end_date": {
+                        "type": "string",
+                        "description": "End date (YYYY-MM-DD)"
+                    },
+                    "limit": {
+                        "type": "integer",
+                        "description": "Max rows to return",
+                        "default": 90
+                    }
+                }
+            }
+        ),
+        types.Tool(
+            name="get_health_trends",
+            description="Get health metric trends over time. Supports weekly or monthly aggregation of any health metric.",
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "metric": {
+                        "type": "string",
+                        "description": "Metric to analyze: sleep_score, sleep_hours, resting_hr, hrv, stress, steps, body_fat, weight",
+                        "enum": ["sleep_score", "sleep_hours", "resting_hr", "hrv", "stress", "steps", "body_fat", "weight"]
+                    },
+                    "period": {
+                        "type": "string",
+                        "description": "Aggregation period: week or month",
+                        "default": "week",
+                        "enum": ["week", "month"]
+                    },
+                    "limit": {
+                        "type": "integer",
+                        "description": "Number of periods to return",
+                        "default": 12
+                    }
+                },
+                "required": ["metric"]
             }
         )
     ]
@@ -341,6 +492,14 @@ async def handle_call_tool(name: str, arguments: Dict[str, Any]) -> List[types.T
             return await get_training_trends(**arguments)
         elif name == "execute_sql":
             return await execute_sql(**arguments)
+        elif name == "get_daily_health_summary":
+            return await get_daily_health_summary(**arguments)
+        elif name == "get_sleep_analysis":
+            return await get_sleep_analysis(**arguments)
+        elif name == "get_body_composition":
+            return await get_body_composition_data(**arguments)
+        elif name == "get_health_trends":
+            return await get_health_trends(**arguments)
         else:
             logger.error(f"Unknown tool requested: {name}")
             return [
@@ -695,6 +854,235 @@ async def execute_sql(query: str, limit: int = 1000) -> List[types.TextContent]:
                 text=json.dumps({"error": f"SQL Error: {str(e)}"})
             )
         ]
+
+async def get_daily_health_summary(
+    date: Optional[str] = None,
+    start_date: Optional[str] = None,
+    end_date: Optional[str] = None,
+    limit: int = 30
+) -> List[types.TextContent]:
+    """Get combined daily health summary."""
+    with get_db_connection() as conn:
+        cursor = conn.cursor()
+
+        conditions = []
+        params = []
+
+        if date:
+            conditions.append("s.calendar_date = ?")
+            params.append(date)
+        else:
+            if start_date:
+                conditions.append("s.calendar_date >= ?")
+                params.append(start_date)
+            if end_date:
+                conditions.append("s.calendar_date <= ?")
+                params.append(end_date)
+
+        where = ("WHERE " + " AND ".join(conditions)) if conditions else ""
+
+        cursor.execute(f"""
+            SELECT
+                s.calendar_date,
+                s.total_steps, s.step_goal,
+                st.overall_stress_level,
+                st.rest_stress_duration, st.low_stress_duration,
+                st.medium_stress_duration, st.high_stress_duration,
+                h.last_night_avg as hrv_last_night,
+                h.weekly_avg as hrv_weekly_avg,
+                h.status as hrv_status,
+                sl.sleep_time_seconds / 3600.0 as sleep_hours,
+                sl.deep_sleep_seconds / 3600.0 as deep_sleep_hours,
+                sl.light_sleep_seconds / 3600.0 as light_sleep_hours,
+                sl.rem_sleep_seconds / 3600.0 as rem_sleep_hours,
+                sl.sleep_score_overall,
+                sl.average_spo2 as sleep_avg_spo2,
+                sl.average_respiration as sleep_avg_respiration,
+                bb.max_stress_level as bb_max_stress,
+                bb.avg_stress_level as bb_avg_stress,
+                hr.resting_heart_rate, hr.max_heart_rate, hr.min_heart_rate,
+                im.moderate_value as moderate_intensity_min,
+                im.vigorous_value as vigorous_intensity_min,
+                hy.value_in_ml as hydration_ml,
+                hy.goal_in_ml as hydration_goal_ml,
+                fl.total_floors, fl.floor_goal,
+                r.avg_waking_respiration, r.highest_respiration, r.lowest_respiration,
+                sp.avg_spo2, sp.lowest_spo2
+            FROM daily_steps s
+            LEFT JOIN daily_stress st ON s.calendar_date = st.calendar_date
+            LEFT JOIN daily_hrv h ON s.calendar_date = h.calendar_date
+            LEFT JOIN daily_sleep sl ON s.calendar_date = sl.calendar_date
+            LEFT JOIN daily_body_battery bb ON s.calendar_date = bb.calendar_date
+            LEFT JOIN daily_heart_rate hr ON s.calendar_date = hr.calendar_date
+            LEFT JOIN daily_intensity_minutes im ON s.calendar_date = im.calendar_date
+            LEFT JOIN daily_hydration hy ON s.calendar_date = hy.calendar_date
+            LEFT JOIN daily_floors fl ON s.calendar_date = fl.calendar_date
+            LEFT JOIN daily_respiration r ON s.calendar_date = r.calendar_date
+            LEFT JOIN daily_spo2 sp ON s.calendar_date = sp.calendar_date
+            {where}
+            ORDER BY s.calendar_date DESC
+            LIMIT ?
+        """, params + [limit])
+
+        results = [serialize_row(row) for row in cursor.fetchall()]
+        return [types.TextContent(
+            type="text",
+            text=json.dumps({"results_count": len(results), "daily_summaries": results}, indent=2, default=str)
+        )]
+
+
+async def get_sleep_analysis(
+    start_date: Optional[str] = None,
+    end_date: Optional[str] = None,
+    limit: int = 30
+) -> List[types.TextContent]:
+    """Get detailed sleep analysis."""
+    with get_db_connection() as conn:
+        cursor = conn.cursor()
+
+        conditions = []
+        params = []
+        if start_date:
+            conditions.append("calendar_date >= ?")
+            params.append(start_date)
+        if end_date:
+            conditions.append("calendar_date <= ?")
+            params.append(end_date)
+
+        where = ("WHERE " + " AND ".join(conditions)) if conditions else ""
+
+        cursor.execute(f"""
+            SELECT
+                calendar_date,
+                sleep_time_seconds / 3600.0 as total_sleep_hours,
+                deep_sleep_seconds / 3600.0 as deep_sleep_hours,
+                light_sleep_seconds / 3600.0 as light_sleep_hours,
+                rem_sleep_seconds / 3600.0 as rem_sleep_hours,
+                awake_sleep_seconds / 60.0 as awake_minutes,
+                sleep_score_overall, sleep_score_total_duration,
+                sleep_score_stress, sleep_score_awake_count,
+                sleep_score_rem_percentage, sleep_score_restlessness,
+                sleep_score_light_percentage, sleep_score_deep_percentage,
+                average_spo2, lowest_spo2, highest_spo2,
+                average_respiration, lowest_respiration, highest_respiration,
+                avg_sleep_stress,
+                sleep_score_feedback, sleep_score_insight
+            FROM daily_sleep
+            {where}
+            ORDER BY calendar_date DESC
+            LIMIT ?
+        """, params + [limit])
+
+        results = [serialize_row(row) for row in cursor.fetchall()]
+
+        # Add summary stats
+        if results:
+            avg_score = sum(r['sleep_score_overall'] for r in results if r['sleep_score_overall']) / max(1, sum(1 for r in results if r['sleep_score_overall']))
+            avg_hours = sum(r['total_sleep_hours'] for r in results if r['total_sleep_hours']) / max(1, sum(1 for r in results if r['total_sleep_hours']))
+            summary = {
+                "avg_sleep_score": round(avg_score, 1),
+                "avg_sleep_hours": round(avg_hours, 2),
+                "days_analyzed": len(results)
+            }
+        else:
+            summary = {}
+
+        return [types.TextContent(
+            type="text",
+            text=json.dumps({"summary": summary, "sleep_data": results}, indent=2, default=str)
+        )]
+
+
+async def get_body_composition_data(
+    start_date: Optional[str] = None,
+    end_date: Optional[str] = None,
+    limit: int = 90
+) -> List[types.TextContent]:
+    """Get body composition data."""
+    with get_db_connection() as conn:
+        cursor = conn.cursor()
+
+        conditions = []
+        params = []
+        if start_date:
+            conditions.append("calendar_date >= ?")
+            params.append(start_date)
+        if end_date:
+            conditions.append("calendar_date <= ?")
+            params.append(end_date)
+
+        where = ("WHERE " + " AND ".join(conditions)) if conditions else ""
+
+        cursor.execute(f"""
+            SELECT
+                calendar_date,
+                weight / 1000.0 as weight_kg,
+                weight / 1000.0 * 2.20462 as weight_lbs,
+                bmi, body_fat, body_water,
+                bone_mass / 1000.0 as bone_mass_kg,
+                muscle_mass / 1000.0 as muscle_mass_kg,
+                physique_rating, visceral_fat, metabolic_age,
+                source_type
+            FROM body_composition
+            {where}
+            ORDER BY calendar_date DESC
+            LIMIT ?
+        """, params + [limit])
+
+        results = [serialize_row(row) for row in cursor.fetchall()]
+        return [types.TextContent(
+            type="text",
+            text=json.dumps({"results_count": len(results), "body_composition": results}, indent=2, default=str)
+        )]
+
+
+async def get_health_trends(
+    metric: str,
+    period: str = "week",
+    limit: int = 12
+) -> List[types.TextContent]:
+    """Get health metric trends over time."""
+    metric_config = {
+        "sleep_score": ("daily_sleep", "AVG(sleep_score_overall)", "avg_sleep_score"),
+        "sleep_hours": ("daily_sleep", "AVG(sleep_time_seconds / 3600.0)", "avg_sleep_hours"),
+        "resting_hr": ("daily_heart_rate", "AVG(resting_heart_rate)", "avg_resting_hr"),
+        "hrv": ("daily_hrv", "AVG(last_night_avg)", "avg_hrv"),
+        "stress": ("daily_stress", "AVG(overall_stress_level)", "avg_stress"),
+        "steps": ("daily_steps", "AVG(total_steps)", "avg_steps"),
+        "body_fat": ("body_composition", "AVG(body_fat)", "avg_body_fat"),
+        "weight": ("body_composition", "AVG(weight / 1000.0)", "avg_weight_kg"),
+    }
+
+    if metric not in metric_config:
+        return [types.TextContent(type="text", text=json.dumps({"error": f"Unknown metric: {metric}"}))]
+
+    table, expr, alias = metric_config[metric]
+    date_format = "%Y-%W" if period == "week" else "%Y-%m"
+
+    with get_db_connection() as conn:
+        cursor = conn.cursor()
+        cursor.execute(f"""
+            SELECT
+                strftime('{date_format}', calendar_date) as period,
+                {expr} as {alias},
+                COUNT(*) as data_points
+            FROM {table}
+            WHERE calendar_date IS NOT NULL
+            GROUP BY strftime('{date_format}', calendar_date)
+            ORDER BY period DESC
+            LIMIT ?
+        """, (limit,))
+
+        results = [serialize_row(row) for row in cursor.fetchall()]
+        return [types.TextContent(
+            type="text",
+            text=json.dumps({
+                "metric": metric,
+                "period": period,
+                "trends": results
+            }, indent=2, default=str)
+        )]
+
 
 async def main():
     """Run the MCP server over STDIO transport."""

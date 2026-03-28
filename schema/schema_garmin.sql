@@ -205,6 +205,274 @@ INSERT INTO event_types (type_id, type_key, sort_order) VALUES
 (3, 'casual', 3)
 ON CONFLICT (type_key) DO NOTHING;
 
+-- =============================================================================
+-- HEALTH & WELLNESS TABLES
+-- =============================================================================
+
+-- Daily sleep data (from garth SleepData)
+CREATE TABLE IF NOT EXISTS daily_sleep (
+    calendar_date TEXT PRIMARY KEY,
+    sleep_time_seconds INTEGER,
+    nap_time_seconds INTEGER,
+    deep_sleep_seconds INTEGER,
+    light_sleep_seconds INTEGER,
+    rem_sleep_seconds INTEGER,
+    awake_sleep_seconds INTEGER,
+    unmeasurable_sleep_seconds INTEGER,
+    sleep_start_timestamp_gmt BIGINT,
+    sleep_end_timestamp_gmt BIGINT,
+    sleep_start_timestamp_local BIGINT,
+    sleep_end_timestamp_local BIGINT,
+    device_rem_capable BOOLEAN,
+    -- Sleep scores
+    sleep_score_overall INTEGER,
+    sleep_score_total_duration INTEGER,
+    sleep_score_stress INTEGER,
+    sleep_score_awake_count INTEGER,
+    sleep_score_rem_percentage INTEGER,
+    sleep_score_restlessness INTEGER,
+    sleep_score_light_percentage INTEGER,
+    sleep_score_deep_percentage INTEGER,
+    -- SpO2 during sleep
+    average_spo2 REAL,
+    lowest_spo2 INTEGER,
+    highest_spo2 INTEGER,
+    average_spo2_hr_sleep REAL,
+    -- Respiration during sleep
+    average_respiration REAL,
+    lowest_respiration REAL,
+    highest_respiration REAL,
+    -- Stress during sleep
+    avg_sleep_stress REAL,
+    sleep_score_feedback TEXT,
+    sleep_score_insight TEXT,
+    synced_at TEXT DEFAULT (datetime('now'))
+);
+
+-- Daily stress levels (from garth DailyStress)
+CREATE TABLE IF NOT EXISTS daily_stress (
+    calendar_date TEXT PRIMARY KEY,
+    overall_stress_level INTEGER,
+    rest_stress_duration INTEGER,
+    low_stress_duration INTEGER,
+    medium_stress_duration INTEGER,
+    high_stress_duration INTEGER,
+    synced_at TEXT DEFAULT (datetime('now'))
+);
+
+-- Daily HRV (from garth DailyHRV)
+CREATE TABLE IF NOT EXISTS daily_hrv (
+    calendar_date TEXT PRIMARY KEY,
+    weekly_avg INTEGER,
+    last_night_avg INTEGER,
+    last_night_5_min_high INTEGER,
+    baseline_low_upper INTEGER,
+    baseline_balanced_low INTEGER,
+    baseline_balanced_upper INTEGER,
+    baseline_marker_value REAL,
+    status TEXT,
+    feedback_phrase TEXT,
+    synced_at TEXT DEFAULT (datetime('now'))
+);
+
+-- Daily steps (from garth DailySteps)
+CREATE TABLE IF NOT EXISTS daily_steps (
+    calendar_date TEXT PRIMARY KEY,
+    total_steps INTEGER,
+    total_distance INTEGER,
+    step_goal INTEGER,
+    synced_at TEXT DEFAULT (datetime('now'))
+);
+
+-- Daily hydration (from garth DailyHydration)
+CREATE TABLE IF NOT EXISTS daily_hydration (
+    calendar_date TEXT PRIMARY KEY,
+    value_in_ml REAL,
+    goal_in_ml REAL,
+    synced_at TEXT DEFAULT (datetime('now'))
+);
+
+-- Daily intensity minutes (from garth DailyIntensityMinutes)
+CREATE TABLE IF NOT EXISTS daily_intensity_minutes (
+    calendar_date TEXT PRIMARY KEY,
+    weekly_goal INTEGER,
+    moderate_value INTEGER,
+    vigorous_value INTEGER,
+    synced_at TEXT DEFAULT (datetime('now'))
+);
+
+-- Body composition / weight entries (from garth WeightData)
+CREATE TABLE IF NOT EXISTS body_composition (
+    sample_pk INTEGER PRIMARY KEY,
+    calendar_date TEXT,
+    weight REAL,
+    bmi REAL,
+    body_fat REAL,
+    body_water REAL,
+    bone_mass INTEGER,
+    muscle_mass INTEGER,
+    physique_rating REAL,
+    visceral_fat REAL,
+    metabolic_age INTEGER,
+    source_type TEXT,
+    timestamp_gmt BIGINT,
+    synced_at TEXT DEFAULT (datetime('now'))
+);
+
+-- Daily body battery and stress detail (from garth DailyBodyBatteryStress)
+CREATE TABLE IF NOT EXISTS daily_body_battery (
+    calendar_date TEXT PRIMARY KEY,
+    max_stress_level INTEGER,
+    avg_stress_level INTEGER,
+    raw_json TEXT,
+    synced_at TEXT DEFAULT (datetime('now'))
+);
+
+-- Daily heart rate (from Garmin Connect API)
+CREATE TABLE IF NOT EXISTS daily_heart_rate (
+    calendar_date TEXT PRIMARY KEY,
+    resting_heart_rate INTEGER,
+    max_heart_rate INTEGER,
+    min_heart_rate INTEGER,
+    raw_json TEXT,
+    synced_at TEXT DEFAULT (datetime('now'))
+);
+
+-- Daily respiration (from Garmin Connect API)
+CREATE TABLE IF NOT EXISTS daily_respiration (
+    calendar_date TEXT PRIMARY KEY,
+    avg_waking_respiration REAL,
+    highest_respiration REAL,
+    lowest_respiration REAL,
+    raw_json TEXT,
+    synced_at TEXT DEFAULT (datetime('now'))
+);
+
+-- Daily SpO2 (from Garmin Connect API)
+CREATE TABLE IF NOT EXISTS daily_spo2 (
+    calendar_date TEXT PRIMARY KEY,
+    avg_spo2 REAL,
+    lowest_spo2 REAL,
+    latest_spo2 REAL,
+    raw_json TEXT,
+    synced_at TEXT DEFAULT (datetime('now'))
+);
+
+-- Daily floors climbed (from Garmin Connect API)
+CREATE TABLE IF NOT EXISTS daily_floors (
+    calendar_date TEXT PRIMARY KEY,
+    total_floors INTEGER,
+    floor_goal INTEGER,
+    raw_json TEXT,
+    synced_at TEXT DEFAULT (datetime('now'))
+);
+
+-- Training readiness (from Garmin Connect API)
+CREATE TABLE IF NOT EXISTS training_readiness (
+    calendar_date TEXT PRIMARY KEY,
+    score INTEGER,
+    level TEXT,
+    raw_json TEXT,
+    synced_at TEXT DEFAULT (datetime('now'))
+);
+
+-- Training status (from Garmin Connect API)
+CREATE TABLE IF NOT EXISTS training_status (
+    calendar_date TEXT PRIMARY KEY,
+    raw_json TEXT,
+    synced_at TEXT DEFAULT (datetime('now'))
+);
+
+-- Blood pressure readings (from Garmin Connect API)
+CREATE TABLE IF NOT EXISTS blood_pressure (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    calendar_date TEXT,
+    systolic INTEGER,
+    diastolic INTEGER,
+    pulse INTEGER,
+    timestamp_gmt TEXT,
+    notes TEXT,
+    source_type TEXT,
+    synced_at TEXT DEFAULT (datetime('now'))
+);
+
+-- Daily max metrics (from Garmin Connect API)
+CREATE TABLE IF NOT EXISTS daily_max_metrics (
+    calendar_date TEXT PRIMARY KEY,
+    raw_json TEXT,
+    synced_at TEXT DEFAULT (datetime('now'))
+);
+
+-- Fitness age (from Garmin Connect API)
+CREATE TABLE IF NOT EXISTS fitness_age (
+    calendar_date TEXT PRIMARY KEY,
+    raw_json TEXT,
+    synced_at TEXT DEFAULT (datetime('now'))
+);
+
+-- Race predictions (from Garmin Connect API)
+CREATE TABLE IF NOT EXISTS race_predictions (
+    calendar_date TEXT PRIMARY KEY,
+    raw_json TEXT,
+    synced_at TEXT DEFAULT (datetime('now'))
+);
+
+-- Endurance score (from Garmin Connect API)
+CREATE TABLE IF NOT EXISTS endurance_score (
+    calendar_date TEXT PRIMARY KEY,
+    raw_json TEXT,
+    synced_at TEXT DEFAULT (datetime('now'))
+);
+
+-- Hill score (from Garmin Connect API)
+CREATE TABLE IF NOT EXISTS hill_score (
+    calendar_date TEXT PRIMARY KEY,
+    raw_json TEXT,
+    synced_at TEXT DEFAULT (datetime('now'))
+);
+
+-- Registered devices (from Garmin Connect API)
+CREATE TABLE IF NOT EXISTS devices (
+    device_id BIGINT PRIMARY KEY,
+    device_name TEXT,
+    device_type TEXT,
+    raw_json TEXT,
+    synced_at TEXT DEFAULT (datetime('now'))
+);
+
+-- Indexes for health tables
+CREATE INDEX IF NOT EXISTS idx_body_composition_date ON body_composition(calendar_date);
+CREATE INDEX IF NOT EXISTS idx_blood_pressure_date ON blood_pressure(calendar_date);
+
+-- View for daily health summary joining key metrics
+CREATE VIEW IF NOT EXISTS daily_health_summary AS
+SELECT
+    s.calendar_date,
+    s.total_steps,
+    s.step_goal,
+    st.overall_stress_level,
+    h.last_night_avg as hrv_last_night,
+    h.status as hrv_status,
+    sl.sleep_time_seconds / 3600.0 as sleep_hours,
+    sl.deep_sleep_seconds / 3600.0 as deep_sleep_hours,
+    sl.rem_sleep_seconds / 3600.0 as rem_sleep_hours,
+    sl.sleep_score_overall,
+    bb.avg_stress_level as body_battery_avg_stress,
+    hr.resting_heart_rate,
+    im.moderate_value as moderate_intensity_min,
+    im.vigorous_value as vigorous_intensity_min,
+    hy.value_in_ml as hydration_ml,
+    hy.goal_in_ml as hydration_goal_ml
+FROM daily_steps s
+LEFT JOIN daily_stress st ON s.calendar_date = st.calendar_date
+LEFT JOIN daily_hrv h ON s.calendar_date = h.calendar_date
+LEFT JOIN daily_sleep sl ON s.calendar_date = sl.calendar_date
+LEFT JOIN daily_body_battery bb ON s.calendar_date = bb.calendar_date
+LEFT JOIN daily_heart_rate hr ON s.calendar_date = hr.calendar_date
+LEFT JOIN daily_intensity_minutes im ON s.calendar_date = im.calendar_date
+LEFT JOIN daily_hydration hy ON s.calendar_date = hy.calendar_date
+ORDER BY s.calendar_date DESC;
+
 -- View for activity summary with calculated fields
 CREATE VIEW IF NOT EXISTS activity_summary AS
 SELECT 
