@@ -9,6 +9,7 @@ the actual Garmin Connect API response structure.
 Author: Generated with Claude Code
 """
 
+import argparse
 import json
 import os
 import sqlite3
@@ -401,23 +402,26 @@ class GarminConnectDownloader:
             print(f"❌ Authentication failed: {e}")
             raise
     
-    def download_activities(self, limit: int = os.getenv('GARMIN_LIMIT'), start: int = 0):
+    def download_activities(self, limit: int = os.getenv('GARMIN_LIMIT'), start: int = 0, days_back=None):
         """Download activities from Garmin Connect using garth API."""
-        
-        # Get start date from environment variable
-        start_date_str = os.getenv('GARMIN_START_DATE')
+
+        # Determine start date: CLI --days overrides env var
         start_date = None
-        if start_date_str:
-            try:
-                from datetime import datetime
-                start_date = datetime.strptime(start_date_str, '%Y-%m-%d')
-                print(f"📥 Downloading activities from {start_date_str} onwards (limit: {limit}, start: {start})...")
-            except ValueError:
-                print(f"⚠️  Invalid GARMIN_START_DATE format '{start_date_str}'. Expected YYYY-MM-DD. Using default.")
-                start_date = None
+        if days_back is not None:
+            start_date = datetime.now() - timedelta(days=days_back)
+            print(f"📥 Downloading activities from last {days_back} days (limit: {limit})...")
         else:
-            print(f"📥 Downloading up to {limit} activities (starting from {start})...")
-            start_date = None
+            start_date_str = os.getenv('GARMIN_START_DATE')
+            if start_date_str:
+                try:
+                    start_date = datetime.strptime(start_date_str, '%Y-%m-%d')
+                    print(f"📥 Downloading activities from {start_date_str} onwards (limit: {limit}, start: {start})...")
+                except ValueError:
+                    print(f"⚠️  Invalid GARMIN_START_DATE format '{start_date_str}'. Expected YYYY-MM-DD. Using default.")
+                    start_date = None
+            else:
+                print(f"📥 Downloading up to {limit} activities (starting from {start})...")
+                start_date = None
         
         try:
             # Build API parameters (Note: startDate parameter is not supported by this endpoint)
@@ -868,13 +872,16 @@ class GarminConnectDownloader:
     # Health & Wellness Data Download Methods
     # =========================================================================
 
-    def _get_date_range(self):
-        """Get start/end dates from config."""
-        start_date_str = os.getenv('GARMIN_START_DATE')
-        if start_date_str:
-            start = datetime.strptime(start_date_str, '%Y-%m-%d').date()
+    def _get_date_range(self, days_back=None):
+        """Get start/end dates from config or CLI override."""
+        if days_back is not None:
+            start = date.today() - timedelta(days=days_back)
         else:
-            start = (datetime.now() - timedelta(days=730)).date()
+            start_date_str = os.getenv('GARMIN_START_DATE')
+            if start_date_str:
+                start = datetime.strptime(start_date_str, '%Y-%m-%d').date()
+            else:
+                start = (datetime.now() - timedelta(days=730)).date()
         end = date.today()
         return start, end
 
@@ -930,9 +937,9 @@ class GarminConnectDownloader:
             time.sleep(0.1)  # Be gentle with the API
         print(f"  ✅ {label}: {count} days synced")
 
-    def download_health_data(self):
+    def download_health_data(self, days_back=None):
         """Download all health and wellness data."""
-        start, end = self._get_date_range()
+        start, end = self._get_date_range(days_back=days_back)
         days = (end - start).days + 1
         print(f"\n📥 Downloading health data from {start} to {end} ({days} days)...")
 
@@ -1368,28 +1375,36 @@ class GarminConnectDownloader:
 
 def main():
     """Main function to run the Garmin Connect downloader."""
+    parser = argparse.ArgumentParser(description='Garmin Connect Activities & Health Data Downloader')
+    parser.add_argument('--days', type=int, default=None,
+                        help='Number of days back from today to sync (overrides GARMIN_START_DATE)')
+    args = parser.parse_args()
+
     print("🏃 Garmin Connect Activities Downloader")
     print("Using garth authentication with MFA support")
     print("=" * 50)
-    
+
     try:
         downloader = GarminConnectDownloader()
-        
+
         # Download activities
-        count = downloader.download_activities(limit=int(os.getenv('GARMIN_LIMIT')))
+        count = downloader.download_activities(
+            limit=int(os.getenv('GARMIN_LIMIT')),
+            days_back=args.days
+        )
 
         # Download health & wellness data
-        downloader.download_health_data()
+        downloader.download_health_data(days_back=args.days)
 
         # Show summary
         downloader.print_summary()
 
         print(f"\n✅ Successfully processed {count} activities + health data!")
-        
+
     except Exception as e:
         print(f"❌ Error: {e}")
         return 1
-    
+
     return 0
 
 if __name__ == "__main__":
