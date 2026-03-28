@@ -17,6 +17,9 @@ from datetime import datetime, timedelta
 from typing import Dict, List, Any, Optional
 from contextlib import asynccontextmanager, contextmanager
 
+from dotenv import load_dotenv
+load_dotenv()
+
 import mcp.types as types
 from mcp.server import Server
 from mcp.server.models import InitializationOptions
