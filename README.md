@@ -76,6 +76,8 @@ python garmin_connect_downloader.py
 
 ### 4. Setup MCP Server
 
+#### Option A: Local (STDIO) — for Claude Desktop
+
 Add to your Claude Desktop configuration (`~/Library/Application Support/Claude/claude_desktop_config.json`):
 
 ```json
@@ -90,6 +92,35 @@ Add to your Claude Desktop configuration (`~/Library/Application Support/Claude/
   }
 }
 ```
+
+#### Option B: Remote (Streamable HTTP) — for external MCP clients
+
+Run the server in HTTP mode with bearer token authentication:
+
+```bash
+# Generate an auth token
+export MCP_AUTH_TOKEN=$(python3 -c "import secrets; print(secrets.token_urlsafe(32))")
+
+# Start the HTTP server
+python mcp_server.py --transport http
+```
+
+Connect from any MCP client using:
+
+```json
+{
+  "mcpServers": {
+    "garmin-activities": {
+      "url": "http://your-server:8080/mcp/",
+      "headers": {
+        "Authorization": "Bearer <your-token>"
+      }
+    }
+  }
+}
+```
+
+See [Deployment](#-deployment) for production setup with systemd.
 
 ## 📊 Database Schema
 
@@ -170,10 +201,12 @@ Once connected to Claude Desktop, you can ask:
 ```
 garmin-mcp/
 ├── garmin_connect_downloader.py    # Main downloader script
-├── mcp_server.py                   # MCP server implementation
+├── mcp_server.py                   # MCP server (STDIO + HTTP transport)
 ├── run_mcp_server.sh              # Launcher script
 ├── launcher.py                    # Alternative Python launcher
 ├── schema_garmin.sql              # Database schema
+├── deploy/
+│   └── garmin-mcp.service         # systemd unit for production deployment
 ├── test_mcp_server.py             # Server validation tests
 ├── validate_mcp_standards.py      # MCP compliance checker
 ├── requirements.txt               # Python dependencies
@@ -194,6 +227,52 @@ python test_mcp_server.py
 
 # Validate MCP compliance
 python validate_mcp_standards.py
+```
+
+## 🚀 Deployment
+
+To run the MCP server as a public service on a Linux VPS:
+
+### 1. Deploy to server
+
+```bash
+# Create service user
+sudo useradd --system --shell /usr/sbin/nologin garmin-mcp
+
+# Deploy code
+sudo mkdir -p /opt/garmin-mcp
+# (copy project files to /opt/garmin-mcp)
+sudo chown -R garmin-mcp:garmin-mcp /opt/garmin-mcp
+
+# Setup venv
+sudo -u garmin-mcp python3 -m venv /opt/garmin-mcp/.venv
+sudo -u garmin-mcp /opt/garmin-mcp/.venv/bin/pip install -r /opt/garmin-mcp/requirements.txt
+```
+
+### 2. Configure environment
+
+Create `/opt/garmin-mcp/.env`:
+
+```env
+GARMIN_DB_PATH=/opt/garmin-mcp/garmin_activities.db
+MCP_TRANSPORT=http
+MCP_AUTH_TOKEN=<generate with: python3 -c "import secrets; print(secrets.token_urlsafe(32))">
+MCP_HTTP_HOST=0.0.0.0
+MCP_HTTP_PORT=8080
+```
+
+**Note:** Do not quote values in the `.env` file — systemd's `EnvironmentFile` does not handle quoted values.
+
+### 3. Install systemd service
+
+```bash
+sudo cp /opt/garmin-mcp/deploy/garmin-mcp.service /etc/systemd/system/
+sudo systemctl daemon-reload
+sudo systemctl enable --now garmin-mcp
+
+# Verify
+sudo systemctl status garmin-mcp
+journalctl -u garmin-mcp -f
 ```
 
 ## 🔒 Security & Privacy

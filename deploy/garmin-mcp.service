@@ -1,0 +1,25 @@
+[Unit]
+Description=Garmin MCP Server (Streamable HTTP)
+After=network.target
+
+[Service]
+Type=simple
+User=garmin-mcp
+Group=garmin-mcp
+WorkingDirectory=/opt/garmin-mcp
+ExecStart=/opt/garmin-mcp/.venv/bin/python /opt/garmin-mcp/mcp_server.py --transport http
+EnvironmentFile=/opt/garmin-mcp/.env
+Restart=on-failure
+RestartSec=5
+StandardOutput=journal
+StandardError=journal
+
+# Hardening
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=true
+ReadWritePaths=/opt/garmin-mcp
+PrivateTmp=true
+
+[Install]
+WantedBy=multi-user.target
