@@ -6,6 +6,7 @@ This server exposes the Garmin activities SQLite database to MCP clients,
 providing tools and resources for querying fitness data.
 """
 
+import argparse
 import asyncio
 import os
 import sqlite3
@@ -14,7 +15,7 @@ import logging
 import sys
 from datetime import datetime, timedelta
 from typing import Dict, List, Any, Optional
-from contextlib import contextmanager
+from contextlib import asynccontextmanager, contextmanager
 
 import mcp.types as types
 from mcp.server import Server
@@ -696,13 +697,13 @@ async def execute_sql(query: str, limit: int = 1000) -> List[types.TextContent]:
         ]
 
 async def main():
-    """Run the MCP server."""
+    """Run the MCP server over STDIO transport."""
     # Verify database exists
     if not os.path.exists(DB_PATH):
         logger.error(f"Database not found at {DB_PATH}")
         logger.error("Please ensure the Garmin activities database exists.")
         return
-        
+
     async with mcp.server.stdio.stdio_server() as (read_stream, write_stream):
         await server.run(
             read_stream,
@@ -717,5 +718,87 @@ async def main():
             )
         )
 
+
+def main_http():
+    """Run the MCP server over Streamable HTTP transport with bearer token auth."""
+    import uvicorn
+    from starlette.applications import Starlette
+    from starlette.middleware import Middleware
+    from starlette.middleware.authentication import AuthenticationMiddleware
+    from starlette.routing import Mount, Route
+
+    from mcp.server.auth.middleware.bearer_auth import BearerAuthBackend, RequireAuthMiddleware
+    from mcp.server.auth.provider import AccessToken
+    from mcp.server.streamable_http_manager import StreamableHTTPSessionManager
+
+    # Verify database exists
+    if not os.path.exists(DB_PATH):
+        logger.error(f"Database not found at {DB_PATH}")
+        logger.error("Please ensure the Garmin activities database exists.")
+        return
+
+    # Read config
+    auth_token = os.getenv("MCP_AUTH_TOKEN")
+    if not auth_token:
+        logger.error("MCP_AUTH_TOKEN environment variable is required for HTTP transport")
+        sys.exit(1)
+
+    host = os.getenv("MCP_HTTP_HOST", "0.0.0.0")
+    port = int(os.getenv("MCP_HTTP_PORT", "8080"))
+
+    # Static bearer token verifier
+    class StaticTokenVerifier:
+        def __init__(self, expected_token: str):
+            self.expected_token = expected_token
+
+        async def verify_token(self, token: str) -> AccessToken | None:
+            if token == self.expected_token:
+                return AccessToken(
+                    token=token,
+                    client_id="static",
+                    scopes=["mcp:access"],
+                    expires_at=None,
+                )
+            return None
+
+    verifier = StaticTokenVerifier(auth_token)
+    session_manager = StreamableHTTPSessionManager(app=server, stateless=True)
+
+    @asynccontextmanager
+    async def lifespan(app):
+        async with session_manager.run():
+            yield
+
+    mcp_app = RequireAuthMiddleware(
+        session_manager.handle_request,
+        required_scopes=["mcp:access"],
+    )
+
+    app = Starlette(
+        routes=[
+            Mount("/mcp", app=mcp_app),
+        ],
+        middleware=[
+            Middleware(AuthenticationMiddleware, backend=BearerAuthBackend(verifier)),
+        ],
+        lifespan=lifespan,
+    )
+
+    logger.info(f"Starting Garmin MCP HTTP server on {host}:{port}")
+    uvicorn.run(app, host=host, port=port, log_level="info")
+
+
 if __name__ == "__main__":
-    asyncio.run(main())
+    parser = argparse.ArgumentParser(description="Garmin MCP Server")
+    parser.add_argument(
+        "--transport",
+        choices=["stdio", "http"],
+        default=os.getenv("MCP_TRANSPORT", "stdio"),
+        help="Transport mode (default: stdio, or set MCP_TRANSPORT env var)",
+    )
+    args = parser.parse_args()
+
+    if args.transport == "http":
+        main_http()
+    else:
+        asyncio.run(main())
