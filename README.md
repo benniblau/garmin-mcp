@@ -99,7 +99,7 @@ Run the server in HTTP mode with bearer token authentication:
 
 ```bash
 # Generate an auth token
-export MCP_AUTH_TOKEN=$(python3 -c "import secrets; print(secrets.token_urlsafe(32))")
+export GARMIN_MCP_AUTH_TOKEN=$(python3 -c "import secrets; print(secrets.token_urlsafe(32))")
 
 # Start the HTTP server
 python mcp_server.py --transport http
@@ -255,10 +255,10 @@ Create `/opt/garmin-mcp/.env`:
 
 ```env
 GARMIN_DB_PATH=/opt/garmin-mcp/garmin_activities.db
-MCP_TRANSPORT=http
-MCP_AUTH_TOKEN=<generate with: python3 -c "import secrets; print(secrets.token_urlsafe(32))">
-MCP_HTTP_HOST=0.0.0.0
-MCP_HTTP_PORT=8080
+GARMIN_MCP_TRANSPORT=http
+GARMIN_MCP_AUTH_TOKEN=<generate with: python3 -c "import secrets; print(secrets.token_urlsafe(32))">
+GARMIN_MCP_HTTP_HOST=0.0.0.0
+GARMIN_MCP_HTTP_PORT=8080
 ```
 
 **Note:** Do not quote values in the `.env` file — systemd's `EnvironmentFile` does not handle quoted values.
