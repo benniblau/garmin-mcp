@@ -818,13 +818,13 @@ def main_http():
         return
 
     # Read config
-    auth_token = os.getenv("MCP_AUTH_TOKEN")
+    auth_token = os.getenv("GARMIN_MCP_AUTH_TOKEN")
     if not auth_token:
-        logger.error("MCP_AUTH_TOKEN environment variable is required for HTTP transport")
+        logger.error("GARMIN_MCP_AUTH_TOKEN environment variable is required for HTTP transport")
         sys.exit(1)
 
-    host = os.getenv("MCP_HTTP_HOST", "0.0.0.0")
-    port = int(os.getenv("MCP_HTTP_PORT", "8080"))
+    host = os.getenv("GARMIN_MCP_HTTP_HOST", "0.0.0.0")
+    port = int(os.getenv("GARMIN_MCP_HTTP_PORT", "8080"))
 
     # Static bearer token verifier
     class StaticTokenVerifier:
@@ -873,8 +873,8 @@ if __name__ == "__main__":
     parser.add_argument(
         "--transport",
         choices=["stdio", "http"],
-        default=os.getenv("MCP_TRANSPORT", "stdio"),
-        help="Transport mode (default: stdio, or set MCP_TRANSPORT env var)",
+        default=os.getenv("GARMIN_MCP_TRANSPORT", "stdio"),
+        help="Transport mode (default: stdio, or set GARMIN_MCP_TRANSPORT env var)",
     )
     args = parser.parse_args()
 

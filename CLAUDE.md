@@ -20,8 +20,8 @@ python garmin_connect_downloader.py
 # Run MCP server locally (STDIO, used by Claude Desktop)
 ./run_mcp_server.sh
 
-# Run MCP server over HTTP (for remote clients, requires MCP_AUTH_TOKEN)
-MCP_AUTH_TOKEN=<token> python mcp_server.py --transport http
+# Run MCP server over HTTP (for remote clients, requires GARMIN_MCP_AUTH_TOKEN)
+GARMIN_MCP_AUTH_TOKEN=<token> python mcp_server.py --transport http
 ```
 
 No test framework is configured. There are no lint or format commands.
