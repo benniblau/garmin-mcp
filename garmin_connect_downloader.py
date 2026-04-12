@@ -360,44 +360,65 @@ class GarminConnectDownloader:
         """Authenticate with Garmin Connect using garth."""
         email = os.getenv('GARMIN_EMAIL')
         password = os.getenv('GARMIN_PASSWORD')
-        
+
         if not email or not password:
             print("❌ Please set GARMIN_EMAIL and GARMIN_PASSWORD in .env file")
             raise ValueError("Missing Garmin credentials")
-        
+
+        session_path = os.getenv('GARTH_SESSION_PATH', '.garth')
+        # Ensure the session directory exists so garth.save() can write to it
+        os.makedirs(session_path, exist_ok=True)
+
         print("🔐 Authenticating with Garmin Connect...")
-        
+
         try:
-            # Try to resume existing session first
-            try:
-                garth.resume(os.getenv('GARTH_SESSION_PATH'))
-                print("✅ Resumed existing Garmin session")
-                
-                # Test the connection with a simple API call
+            # Try to resume existing session first (only if token files are present)
+            token_file = os.path.join(session_path, 'oauth1_token.json')
+            if os.path.exists(token_file):
                 try:
-                    # Use activities endpoint instead of problematic userprofile endpoint
-                    activities = garth.connectapi('/activitylist-service/activities/search/activities', params={'limit': 1})
-                    print("✅ Session valid - Connection test successful")
-                    return
-                except Exception as test_error:
-                    print(f"⚠️  Session expired: {test_error}")
-                    # Continue to fresh login
-                    
-            except Exception as resume_error:
-                print(f"⚠️  Could not resume session: {resume_error}")
-        
-            # Fresh login with MFA support
+                    garth.resume(session_path)
+                    print("✅ Resumed existing Garmin session")
+
+                    # Test the connection with a simple API call
+                    try:
+                        # Use activities endpoint instead of problematic userprofile endpoint
+                        activities = garth.connectapi('/activitylist-service/activities/search/activities', params={'limit': 1})
+                        print("✅ Session valid - Connection test successful")
+                        return
+                    except Exception as test_error:
+                        print(f"⚠️  Session expired: {test_error}")
+                        # Continue to fresh login
+
+                except Exception as resume_error:
+                    print(f"⚠️  Could not resume session: {resume_error}")
+            else:
+                print(f"⚠️  No saved session found at {session_path!r} — performing fresh login.")
+                print("    Tip: run the downloader locally once, then copy the session directory to production.")
+
+            # Fresh login with MFA support — retry on 429 with exponential backoff
             print("🔑 Performing fresh Garmin login (MFA supported)...")
-            garth.login(email, password)
-            
+            max_attempts = 3
+            for attempt in range(1, max_attempts + 1):
+                try:
+                    garth.login(email, password)
+                    break
+                except Exception as login_err:
+                    err_str = str(login_err)
+                    if '429' in err_str and attempt < max_attempts:
+                        wait = 30 * (2 ** (attempt - 1))  # 30s, 60s
+                        print(f"⚠️  Rate limited (429) — waiting {wait}s before retry {attempt + 1}/{max_attempts}...")
+                        time.sleep(wait)
+                    else:
+                        raise
+
             # Save the session for future use
-            garth.save(os.getenv('GARTH_SESSION_PATH'))
+            garth.save(session_path)
             print("✅ Session saved successfully")
-            
+
             # Test the new session
             activities = garth.connectapi('/activitylist-service/activities/search/activities', params={'limit': 1})
             print("✅ Authentication successful - Connection test passed")
-            
+
         except Exception as e:
             print(f"❌ Authentication failed: {e}")
             raise
