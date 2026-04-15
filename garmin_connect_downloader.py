@@ -996,10 +996,23 @@ class GarminConnectDownloader:
     # -- Garth Stats methods (bulk) --
 
     def _download_daily_steps(self, start, end, days):
-        from garth.stats import DailySteps
+        from typing import ClassVar
+        from pydantic.dataclasses import dataclass
+        from garth.stats._base import Stats
+
+        # garth's DailySteps declares step_goal as non-optional int, but the
+        # API can return null — define a local version that allows None.
+        @dataclass
+        class DailyStepsFixed(Stats):
+            total_steps: int | None
+            total_distance: int | None
+            step_goal: int | None
+            _path: ClassVar[str] = "/usersummary-service/stats/steps/daily/{start}/{end}"
+            _page_size: ClassVar[int] = 28
+
         print(f"  📊 Downloading daily steps...")
         try:
-            items = DailySteps.list(end, period=days)
+            items = DailyStepsFixed.list(end, period=days)
             for item in items:
                 self._upsert('daily_steps', {
                     'calendar_date': str(item.calendar_date),
