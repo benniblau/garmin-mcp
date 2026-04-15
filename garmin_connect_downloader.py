@@ -1025,10 +1025,23 @@ class GarminConnectDownloader:
             print(f"  ⚠️ Daily steps failed: {e}")
 
     def _download_daily_stress(self, start, end, days):
-        from garth.stats import DailyStress
+        from typing import ClassVar
+        from pydantic.dataclasses import dataclass
+        from garth.stats._base import Stats
+
+        @dataclass
+        class DailyStressFixed(Stats):
+            overall_stress_level: int | None
+            rest_stress_duration: int | None = None
+            low_stress_duration: int | None = None
+            medium_stress_duration: int | None = None
+            high_stress_duration: int | None = None
+            _path: ClassVar[str] = "/usersummary-service/stats/stress/daily/{start}/{end}"
+            _page_size: ClassVar[int] = 28
+
         print(f"  📊 Downloading daily stress...")
         try:
-            items = DailyStress.list(end, period=days)
+            items = DailyStressFixed.list(end, period=days)
             for item in items:
                 self._upsert('daily_stress', {
                     'calendar_date': str(item.calendar_date),
@@ -1043,33 +1056,59 @@ class GarminConnectDownloader:
             print(f"  ⚠️ Daily stress failed: {e}")
 
     def _download_daily_hrv(self, start, end, days):
-        from garth.stats import DailyHRV
+        from garth.utils import camel_to_snake_dict
         print(f"  📊 Downloading daily HRV...")
         try:
-            items = DailyHRV.list(end, period=days)
-            for item in items:
-                baseline = item.baseline
+            # Call the API directly — garth's DailyHRV requires status/feedback_phrase
+            # as non-optional str, but the API can return null for some entries.
+            from datetime import timedelta
+            chunk_size = 28
+            all_items = []
+            chunk_start = start
+            while chunk_start <= end:
+                chunk_end = min(chunk_start + timedelta(days=chunk_size - 1), end)
+                response = garth.connectapi(
+                    f"/hrv-service/hrv/daily/{chunk_start}/{chunk_end}"
+                )
+                if response:
+                    summaries = camel_to_snake_dict(response).get("hrv_summaries", [])
+                    all_items.extend(summaries)
+                chunk_start = chunk_end + timedelta(days=1)
+            count = 0
+            for hrv in all_items:
+                baseline = hrv.get('baseline') or {}
                 self._upsert('daily_hrv', {
-                    'calendar_date': str(item.calendar_date),
-                    'weekly_avg': item.weekly_avg,
-                    'last_night_avg': item.last_night_avg,
-                    'last_night_5_min_high': item.last_night_5_min_high,
-                    'baseline_low_upper': baseline.low_upper if baseline else None,
-                    'baseline_balanced_low': baseline.balanced_low if baseline else None,
-                    'baseline_balanced_upper': baseline.balanced_upper if baseline else None,
-                    'baseline_marker_value': baseline.marker_value if baseline else None,
-                    'status': item.status,
-                    'feedback_phrase': item.feedback_phrase,
+                    'calendar_date': hrv.get('calendar_date'),
+                    'weekly_avg': hrv.get('weekly_avg'),
+                    'last_night_avg': hrv.get('last_night_avg'),
+                    'last_night_5_min_high': hrv.get('last_night5_min_high'),
+                    'baseline_low_upper': baseline.get('low_upper'),
+                    'baseline_balanced_low': baseline.get('balanced_low'),
+                    'baseline_balanced_upper': baseline.get('balanced_upper'),
+                    'baseline_marker_value': baseline.get('marker_value'),
+                    'status': hrv.get('status'),
+                    'feedback_phrase': hrv.get('feedback_phrase'),
                 })
-            print(f"  ✅ Daily HRV: {len(items)} days synced")
+                count += 1
+            print(f"  ✅ Daily HRV: {count} days synced")
         except Exception as e:
             print(f"  ⚠️ Daily HRV failed: {e}")
 
     def _download_daily_hydration(self, start, end, days):
-        from garth.stats import DailyHydration
+        from typing import ClassVar
+        from pydantic.dataclasses import dataclass
+        from garth.stats._base import Stats
+
+        @dataclass
+        class DailyHydrationFixed(Stats):
+            value_in_ml: float | None
+            goal_in_ml: float | None
+            _path: ClassVar[str] = "/usersummary-service/stats/hydration/daily/{start}/{end}"
+            _page_size: ClassVar[int] = 28
+
         print(f"  📊 Downloading daily hydration...")
         try:
-            items = DailyHydration.list(end, period=days)
+            items = DailyHydrationFixed.list(end, period=days)
             for item in items:
                 self._upsert('daily_hydration', {
                     'calendar_date': str(item.calendar_date),
@@ -1081,10 +1120,21 @@ class GarminConnectDownloader:
             print(f"  ⚠️ Daily hydration failed: {e}")
 
     def _download_daily_intensity_minutes(self, start, end, days):
-        from garth.stats import DailyIntensityMinutes
+        from typing import ClassVar
+        from pydantic.dataclasses import dataclass
+        from garth.stats._base import Stats
+
+        @dataclass
+        class DailyIntensityMinutesFixed(Stats):
+            weekly_goal: int | None
+            moderate_value: int | None = None
+            vigorous_value: int | None = None
+            _path: ClassVar[str] = "/usersummary-service/stats/im/daily/{start}/{end}"
+            _page_size: ClassVar[int] = 28
+
         print(f"  📊 Downloading daily intensity minutes...")
         try:
-            items = DailyIntensityMinutes.list(end, period=days)
+            items = DailyIntensityMinutesFixed.list(end, period=days)
             for item in items:
                 self._upsert('daily_intensity_minutes', {
                     'calendar_date': str(item.calendar_date),
@@ -1143,27 +1193,36 @@ class GarminConnectDownloader:
         self._day_by_day("Sleep data", start, end, fetch)
 
     def _download_body_composition(self, start, end, days):
-        from garth.data import WeightData
         print(f"  📊 Downloading body composition...")
         try:
-            items = WeightData.list(end, days=days)
-            for item in items:
-                self._upsert('body_composition', {
-                    'sample_pk': item.sample_pk,
-                    'calendar_date': str(item.calendar_date),
-                    'weight': item.weight,
-                    'bmi': item.bmi,
-                    'body_fat': item.body_fat,
-                    'body_water': item.body_water,
-                    'bone_mass': item.bone_mass,
-                    'muscle_mass': item.muscle_mass,
-                    'physique_rating': item.physique_rating,
-                    'visceral_fat': item.visceral_fat,
-                    'metabolic_age': item.metabolic_age,
-                    'source_type': item.source_type,
-                    'timestamp_gmt': item.timestamp_gmt,
-                })
-            print(f"  ✅ Body composition: {len(items)} entries synced")
+            # Call the API directly — garth's WeightData requires timestamp_gmt
+            # to be a non-null int, but the API can return null for some entries.
+            data = garth.connectapi(
+                f"/weight-service/weight/range/{start}/{end}?includeAll=true"
+            )
+            summaries = data.get("dailyWeightSummaries", []) if data else []
+            count = 0
+            for summary in summaries:
+                for entry in summary.get("allWeightMetrics", []):
+                    if entry.get("timestampGMT") is None:
+                        continue  # skip entries with no timestamp
+                    self._upsert('body_composition', {
+                        'sample_pk': entry.get('samplePk'),
+                        'calendar_date': entry.get('calendarDate'),
+                        'weight': entry.get('weight'),
+                        'bmi': entry.get('bmi'),
+                        'body_fat': entry.get('bodyFat'),
+                        'body_water': entry.get('bodyWater'),
+                        'bone_mass': entry.get('boneMass'),
+                        'muscle_mass': entry.get('muscleMass'),
+                        'physique_rating': entry.get('physiqueRating'),
+                        'visceral_fat': entry.get('visceralFat'),
+                        'metabolic_age': entry.get('metabolicAge'),
+                        'source_type': entry.get('sourceType'),
+                        'timestamp_gmt': entry.get('timestampGMT'),
+                    })
+                    count += 1
+            print(f"  ✅ Body composition: {count} entries synced")
         except Exception as e:
             print(f"  ⚠️ Body composition failed: {e}")
 
