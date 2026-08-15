@@ -36,6 +36,33 @@ mcp = FastMCP("garmin-activities")
 DEFAULT_DB_PATH = os.path.join(os.path.dirname(__file__), "garmin_activities.db")
 DB_PATH = os.getenv("GARMIN_DB_PATH", DEFAULT_DB_PATH)
 
+# Mount point for the streamable HTTP transport (no trailing slash).
+MCP_PATH = "/mcp"
+
+# Columns that may be interpolated into an ORDER BY clause by query_activities.
+ALLOWED_ACTIVITY_ORDER_COLUMNS = {
+    "start_time_local",
+    "start_time_gmt",
+    "activity_name",
+    "activity_type_key",
+    "distance",
+    "duration",
+    "elapsed_duration",
+    "moving_duration",
+    "elevation_gain",
+    "average_speed",
+    "max_speed",
+    "average_hr",
+    "max_hr",
+    "avg_power",
+    "max_power",
+    "norm_power",
+    "calories",
+    "aerobic_training_effect",
+    "anaerobic_training_effect",
+    "activity_training_load",
+}
+
 @contextmanager
 def get_db_connection():
     """Context manager for database connections."""
@@ -71,10 +98,10 @@ def resource_activities() -> str:
             activities = [serialize_row(row) for row in cursor.fetchall()]
             return json.dumps(activities, indent=2, default=str)
     except sqlite3.Error as e:
-        logger.error(f"Database error in read_resource: {e}")
+        logger.error(f"Database error in resource_activities: {e}")
         return json.dumps({"error": f"Database error: {str(e)}"})
     except Exception as e:
-        logger.error(f"Unexpected error in read_resource: {e}")
+        logger.error(f"Unexpected error in resource_activities: {e}")
         return json.dumps({"error": f"Server error: {str(e)}"})
 
 
@@ -124,10 +151,10 @@ def resource_stats_summary() -> str:
                 "by_activity_type": activity_types
             }, indent=2, default=str)
     except sqlite3.Error as e:
-        logger.error(f"Database error in read_resource: {e}")
+        logger.error(f"Database error in resource_stats_summary: {e}")
         return json.dumps({"error": f"Database error: {str(e)}"})
     except Exception as e:
-        logger.error(f"Unexpected error in read_resource: {e}")
+        logger.error(f"Unexpected error in resource_stats_summary: {e}")
         return json.dumps({"error": f"Server error: {str(e)}"})
 
 
@@ -158,10 +185,10 @@ def resource_stats_monthly() -> str:
             monthly_stats = [serialize_row(row) for row in cursor.fetchall()]
             return json.dumps(monthly_stats, indent=2, default=str)
     except sqlite3.Error as e:
-        logger.error(f"Database error in read_resource: {e}")
+        logger.error(f"Database error in resource_stats_monthly: {e}")
         return json.dumps({"error": f"Database error: {str(e)}"})
     except Exception as e:
-        logger.error(f"Unexpected error in read_resource: {e}")
+        logger.error(f"Unexpected error in resource_stats_monthly: {e}")
         return json.dumps({"error": f"Server error: {str(e)}"})
 
 
@@ -184,10 +211,10 @@ def resource_activities_recent() -> str:
             recent_activities = [serialize_row(row) for row in cursor.fetchall()]
             return json.dumps(recent_activities, indent=2, default=str)
     except sqlite3.Error as e:
-        logger.error(f"Database error in read_resource: {e}")
+        logger.error(f"Database error in resource_activities_recent: {e}")
         return json.dumps({"error": f"Database error: {str(e)}"})
     except Exception as e:
-        logger.error(f"Unexpected error in read_resource: {e}")
+        logger.error(f"Unexpected error in resource_activities_recent: {e}")
         return json.dumps({"error": f"Server error: {str(e)}"})
 
 
@@ -224,10 +251,10 @@ def resource_health_summary() -> str:
                     summary[table] = {"count": 0, "earliest": None, "latest": None}
             return json.dumps(summary, indent=2, default=str)
     except sqlite3.Error as e:
-        logger.error(f"Database error in read_resource: {e}")
+        logger.error(f"Database error in resource_health_summary: {e}")
         return json.dumps({"error": f"Database error: {str(e)}"})
     except Exception as e:
-        logger.error(f"Unexpected error in read_resource: {e}")
+        logger.error(f"Unexpected error in resource_health_summary: {e}")
         return json.dumps({"error": f"Server error: {str(e)}"})
 
 
@@ -259,10 +286,10 @@ def resource_health_recent() -> str:
                     result[key] = []
             return json.dumps(result, indent=2, default=str)
     except sqlite3.Error as e:
-        logger.error(f"Database error in read_resource: {e}")
+        logger.error(f"Database error in resource_health_recent: {e}")
         return json.dumps({"error": f"Database error: {str(e)}"})
     except Exception as e:
-        logger.error(f"Unexpected error in read_resource: {e}")
+        logger.error(f"Unexpected error in resource_health_recent: {e}")
         return json.dumps({"error": f"Server error: {str(e)}"})
 
 
@@ -332,8 +359,16 @@ async def query_activities(
             if conditions:
                 where_clause = "WHERE " + " AND ".join(conditions)
 
-            # Build ORDER BY clause
+            # Build ORDER BY clause. order_by is interpolated into the SQL text,
+            # so it must be validated against a fixed allowlist — never passed
+            # through from the caller unchecked.
+            if order_by not in ALLOWED_ACTIVITY_ORDER_COLUMNS:
+                return json.dumps({
+                    "error": f"Invalid order_by column: {order_by}",
+                    "allowed": sorted(ALLOWED_ACTIVITY_ORDER_COLUMNS),
+                })
             order_direction = "DESC" if order_desc else "ASC"
+            limit = max(1, min(limit, 1000))
 
             query = f"""
                 SELECT
@@ -850,6 +885,7 @@ def main_http():
             yield
 
     def _normalize_path(inner):
+        """Give the session manager a non-empty path when mounted at /mcp."""
         async def wrapped(scope, receive, send):
             if scope["type"] == "http" and not scope.get("path"):
                 scope = {**scope, "path": "/", "raw_path": b"/"}
@@ -863,7 +899,7 @@ def main_http():
 
     app = Starlette(
         routes=[
-            Mount("/mcp", app=mcp_app),
+            Mount(MCP_PATH, app=mcp_app),
         ],
         middleware=[
             Middleware(AuthenticationMiddleware, backend=BearerAuthBackend(verifier)),
@@ -871,8 +907,28 @@ def main_http():
         lifespan=lifespan,
     )
 
+    def _accept_bare_mcp_path(inner):
+        """
+        Make `/mcp` and `/mcp/` behave identically.
+
+        Starlette compiles Mount("/mcp") to the regex `^/mcp/(?P<path>.*)$`, so a
+        request to bare `/mcp` does not match and the router answers with a 307
+        redirect to `/mcp/`. Many MCP clients do not follow redirects, and some
+        drop the Authorization header when they do. Rewriting the path here —
+        outside the router — means both spellings are served directly.
+        """
+        async def wrapped(scope, receive, send):
+            if scope["type"] in ("http", "websocket") and scope.get("path") == MCP_PATH:
+                scope = {
+                    **scope,
+                    "path": MCP_PATH + "/",
+                    "raw_path": (MCP_PATH + "/").encode("ascii"),
+                }
+            await inner(scope, receive, send)
+        return wrapped
+
     logger.info(f"Starting Garmin MCP HTTP server on {host}:{port}")
-    uvicorn.run(app, host=host, port=port, log_level="info")
+    uvicorn.run(_accept_bare_mcp_path(app), host=host, port=port, log_level="info")
 
 
 if __name__ == "__main__":

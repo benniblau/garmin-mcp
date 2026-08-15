@@ -1,6 +1,32 @@
-__pycache__/
-.claude/
-.garmin/
-.venv/
+# Credentials and secrets
 .env
-garmin_activities.db
+
+# Garth session tokens — written by the downloader via GARTH_SESSION_PATH.
+# The directory is .garth (not .garmin); getting this wrong commits live
+# OAuth tokens to the repository.
+.garth/
+.garmin/
+
+# Database
+*.db
+*.db-shm
+*.db-wal
+
+# Python
+.venv/
+__pycache__/
+*.py[cod]
+*.egg-info/
+dist/
+build/
+
+# macOS
+.DS_Store
+
+# IDE
+.idea/
+.vscode/
+*.swp
+
+# Claude Code local settings
+.claude/

@@ -84,7 +84,8 @@ Add to your Claude Desktop configuration (`~/Library/Application Support/Claude/
 {
   "mcpServers": {
     "garmin-activities": {
-      "command": "/path/to/garmin-mcp/run_mcp_server.sh",
+      "command": "/path/to/garmin-mcp/.venv/bin/python",
+      "args": ["/path/to/garmin-mcp/mcp_server.py", "--transport", "stdio"],
       "env": {
         "GARMIN_DB_PATH": "/path/to/garmin-mcp/garmin_activities.db"
       }
@@ -202,16 +203,13 @@ Once connected to Claude Desktop, you can ask:
 garmin-mcp/
 ├── garmin_connect_downloader.py    # Main downloader script
 ├── mcp_server.py                   # MCP server (STDIO + HTTP transport)
-├── run_mcp_server.sh              # Launcher script
-├── launcher.py                    # Alternative Python launcher
-├── schema_garmin.sql              # Database schema
+├── schema/
+│   └── schema_garmin.sql           # Database schema (single source of truth)
 ├── deploy/
-│   └── garmin-mcp.service         # systemd unit for production deployment
-├── test_mcp_server.py             # Server validation tests
-├── validate_mcp_standards.py      # MCP compliance checker
-├── requirements.txt               # Python dependencies
-├── .env.example                   # Environment template
-└── README_MCP.md                  # Detailed MCP documentation
+│   └── garmin-mcp.service          # systemd unit for production deployment
+├── requirements.txt                # Python dependencies
+├── .env.example                    # Environment template
+└── README.md                       # This file
 ```
 
 ### Key Technologies
@@ -306,8 +304,8 @@ This project is licensed under the MIT License - see the [LICENSE](LICENSE) file
 ### Common Issues
 
 **"ModuleNotFoundError: No module named 'mcp'"**
-- Use the provided launcher scripts (`run_mcp_server.sh` or `launcher.py`)
-- Ensure virtual environment is properly activated
+- Invoke the interpreter inside the venv directly: `.venv/bin/python mcp_server.py`
+- Reinstall dependencies with `.venv/bin/pip install -r requirements.txt`
 
 **"Database not found"**
 - Run the downloader first: `python garmin_connect_downloader.py`

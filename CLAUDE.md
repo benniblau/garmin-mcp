@@ -18,7 +18,7 @@ pip install -r requirements.txt
 python garmin_connect_downloader.py
 
 # Run MCP server locally (STDIO, used by Claude Desktop)
-./run_mcp_server.sh
+.venv/bin/python mcp_server.py --transport stdio
 
 # Run MCP server over HTTP (for remote clients, requires GARMIN_MCP_AUTH_TOKEN)
 GARMIN_MCP_AUTH_TOKEN=<token> python mcp_server.py --transport http
@@ -45,7 +45,8 @@ Two main components, both pure Python with no framework beyond the MCP SDK:
 - 6 resources: activities, stats/summary, stats/monthly, activities/recent, health/summary, health/recent
 - 9 tools: `query_activities`, `get_activity_details`, `get_power_analysis`, `get_training_trends`, `execute_sql`, `get_daily_health_summary`, `get_sleep_analysis`, `get_body_composition`, `get_health_trends`
 - HTTP mode uses `StreamableHTTPSessionManager` (stateless) with `BearerAuthBackend` + `RequireAuthMiddleware`
-- `run_mcp_server.sh` is the STDIO launcher; `--transport http` for HTTP mode
+- `--transport stdio` for local Claude Desktop, `--transport http` for remote clients
+- HTTP mode serves both `/mcp` and `/mcp/` (the bare path is rewritten, not redirected)
 - `deploy/garmin-mcp.service` — systemd unit for production deployment on Linux VPS
 
 ### Database
@@ -53,6 +54,8 @@ Two main components, both pure Python with no framework beyond the MCP SDK:
 - Health tables: `daily_sleep`, `daily_stress`, `daily_hrv`, `daily_steps`, `daily_hydration`, `daily_intensity_minutes`, `body_composition`, `daily_body_battery`, `daily_heart_rate`, `daily_respiration`, `daily_spo2`, `daily_floors`, `training_readiness`, `training_status`, `blood_pressure`, `daily_max_metrics`, `fitness_age`, `race_predictions`, `endurance_score`, `hill_score`, `devices`
 - Key units: distance in meters, duration in seconds, speed in m/s, weight in grams — the MCP server converts in query results
 - `daily_health_summary` view joins steps/stress/HRV/sleep/body battery/heart rate/intensity/hydration
+  over a UNION of every source table's dates, so a day missing one dataset still appears
 - `activity_summary` view provides pre-calculated conversions (km, miles, pace, mph)
-- `schema/schema_garmin.sql` is the canonical schema reference
+- `schema/schema_garmin.sql` is the canonical schema — `init_database()` executes this
+  file directly, so the DDL exists in exactly one place
 - Tables with `raw_json` column (heart rate, respiration, SpO2, floors, training, etc.) store the full API response for detailed analysis via `execute_sql` with SQLite JSON functions

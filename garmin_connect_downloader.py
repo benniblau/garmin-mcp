@@ -15,6 +15,7 @@ import os
 import sqlite3
 import time
 from datetime import date, datetime, timedelta, timezone
+from pathlib import Path
 from typing import Dict, Any, List
 from dotenv import load_dotenv
 
@@ -30,6 +31,11 @@ except ImportError as e:
 # Load environment variables
 load_dotenv()
 
+# Canonical schema — the downloader creates the database from this file so the
+# DDL lives in exactly one place.
+SCHEMA_PATH = Path(__file__).parent / "schema" / "schema_garmin.sql"
+
+
 class GarminConnectDownloader:
     """Garmin Connect activity downloader using garth authentication."""
 
@@ -39,323 +45,29 @@ class GarminConnectDownloader:
         self.authenticate()
     
     def init_database(self):
-        """Initialize the SQLite database with the Garmin schema."""
+        """Initialize the SQLite database from schema/schema_garmin.sql."""
         print(f"Initializing Garmin database: {self.db_path}")
-        
-        # Create the database schema based on garmin_activity_schema.json
-        schema_sql = """
-        -- Main activities table matching Garmin API structure
-        CREATE TABLE IF NOT EXISTS activities (
-            -- Primary identifiers
-            activity_id BIGINT PRIMARY KEY,
-            activity_name TEXT NOT NULL,
-            
-            -- Timing
-            start_time_local TEXT,
-            start_time_gmt TEXT,
-            end_time_gmt TEXT,
-            begin_timestamp BIGINT,
-            
-            -- Activity classification
-            activity_type_id INTEGER,
-            activity_type_key TEXT,
-            activity_type_parent_id INTEGER,
-            activity_type_is_hidden BOOLEAN,
-            activity_type_restricted BOOLEAN,
-            activity_type_trimmable BOOLEAN,
-            
-            sport_type_id INTEGER,
-            event_type_id INTEGER,
-            event_type_key TEXT,
-            event_type_sort_order INTEGER,
-            
-            -- Duration (seconds)
-            duration REAL,
-            elapsed_duration REAL,
-            moving_duration REAL,
-            min_activity_lap_duration REAL,
-            
-            -- Distance and elevation
-            distance REAL, -- meters
-            elevation_gain REAL, -- meters
-            elevation_loss REAL, -- meters
-            min_elevation REAL, -- meters
-            max_elevation REAL, -- meters
-            max_vertical_speed REAL, -- m/s
-            
-            -- Speed
-            average_speed REAL, -- m/s
-            max_speed REAL, -- m/s
-            
-            -- Location
-            start_latitude REAL,
-            start_longitude REAL,
-            end_latitude REAL,
-            end_longitude REAL,
-            time_zone_id INTEGER,
-            
-            -- Owner/Athlete info
-            owner_id BIGINT,
-            owner_display_name TEXT,
-            owner_full_name TEXT,
-            owner_profile_image_small TEXT,
-            owner_profile_image_medium TEXT,
-            owner_profile_image_large TEXT,
-            user_pro BOOLEAN DEFAULT FALSE,
-            
-            -- Heart rate
-            average_hr REAL,
-            max_hr REAL,
-            hr_time_in_zone_1 REAL,
-            hr_time_in_zone_2 REAL,
-            hr_time_in_zone_3 REAL,
-            hr_time_in_zone_4 REAL,
-            hr_time_in_zone_5 REAL,
-            
-            -- Power data
-            avg_power REAL,
-            max_power REAL,
-            norm_power REAL,
-            max_20min_power REAL,
-            max_avg_power_1 INTEGER,
-            max_avg_power_2 INTEGER,
-            max_avg_power_5 INTEGER,
-            max_avg_power_10 INTEGER,
-            max_avg_power_20 INTEGER,
-            max_avg_power_30 INTEGER,
-            max_avg_power_60 INTEGER,
-            max_avg_power_120 INTEGER,
-            max_avg_power_300 INTEGER,
-            max_avg_power_600 INTEGER,
-            max_avg_power_1200 INTEGER,
-            max_avg_power_1800 INTEGER,
-            exclude_from_power_curve_reports BOOLEAN DEFAULT FALSE,
-            
-            -- Power zones
-            power_time_in_zone_1 REAL,
-            power_time_in_zone_2 REAL,
-            power_time_in_zone_3 REAL,
-            power_time_in_zone_4 REAL,
-            power_time_in_zone_5 REAL,
-            power_time_in_zone_6 REAL,
-            power_time_in_zone_7 REAL,
-            
-            -- Cadence
-            average_biking_cadence_rpm REAL,
-            max_biking_cadence_rpm REAL,
-            
-            -- Training effects
-            aerobic_training_effect REAL,
-            anaerobic_training_effect REAL,
-            training_effect_label TEXT,
-            aerobic_training_effect_message TEXT,
-            anaerobic_training_effect_message TEXT,
-            activity_training_load REAL,
-            
-            -- Intensity minutes
-            moderate_intensity_minutes INTEGER,
-            vigorous_intensity_minutes INTEGER,
-            
-            -- Energy
-            calories REAL,
-            
-            -- Device info
-            device_id BIGINT,
-            manufacturer TEXT,
-            
-            -- Activity flags
-            has_polyline BOOLEAN DEFAULT FALSE,
-            has_images BOOLEAN DEFAULT FALSE,
-            has_video BOOLEAN DEFAULT FALSE,
-            has_heat_map BOOLEAN DEFAULT FALSE,
-            has_splits BOOLEAN DEFAULT FALSE,
-            manual_activity BOOLEAN DEFAULT FALSE,
-            auto_calc_calories BOOLEAN DEFAULT FALSE,
-            elevation_corrected BOOLEAN DEFAULT FALSE,
-            atp_activity BOOLEAN DEFAULT FALSE,
-            favorite BOOLEAN DEFAULT FALSE,
-            pr BOOLEAN DEFAULT FALSE,
-            purposeful BOOLEAN DEFAULT FALSE,
-            qualifying_dive BOOLEAN DEFAULT FALSE,
-            deco_dive BOOLEAN DEFAULT FALSE,
-            parent BOOLEAN DEFAULT FALSE,
-            
-            -- Lap info
-            lap_count INTEGER,
-            
-            -- Privacy
-            privacy_type_id INTEGER,
-            privacy_type_key TEXT,
-            
-            -- Other metrics
-            strokes REAL,
-            
-            -- Metadata
-            created_at TEXT DEFAULT (datetime('now')),
-            updated_at TEXT DEFAULT (datetime('now')),
-            synced_at TEXT DEFAULT (datetime('now'))
-        );
-        
-        -- User roles table
-        CREATE TABLE IF NOT EXISTS user_roles (
-            user_id BIGINT,
-            role TEXT,
-            created_at TEXT DEFAULT (datetime('now')),
-            PRIMARY KEY (user_id, role)
-        );
-        
-        -- Indexes for performance
-        CREATE INDEX IF NOT EXISTS idx_activities_owner ON activities(owner_id);
-        CREATE INDEX IF NOT EXISTS idx_activities_start_time ON activities(start_time_local);
-        CREATE INDEX IF NOT EXISTS idx_activities_activity_type ON activities(activity_type_key);
-        CREATE INDEX IF NOT EXISTS idx_activities_sport_type ON activities(sport_type_id);
-        CREATE INDEX IF NOT EXISTS idx_activities_distance ON activities(distance);
-        CREATE INDEX IF NOT EXISTS idx_activities_duration ON activities(duration);
-        CREATE INDEX IF NOT EXISTS idx_activities_created ON activities(created_at);
 
-        -- Health & Wellness tables
-        CREATE TABLE IF NOT EXISTS daily_sleep (
-            calendar_date TEXT PRIMARY KEY,
-            sleep_time_seconds INTEGER, nap_time_seconds INTEGER,
-            deep_sleep_seconds INTEGER, light_sleep_seconds INTEGER,
-            rem_sleep_seconds INTEGER, awake_sleep_seconds INTEGER,
-            unmeasurable_sleep_seconds INTEGER,
-            sleep_start_timestamp_gmt BIGINT, sleep_end_timestamp_gmt BIGINT,
-            sleep_start_timestamp_local BIGINT, sleep_end_timestamp_local BIGINT,
-            device_rem_capable BOOLEAN,
-            sleep_score_overall INTEGER, sleep_score_total_duration INTEGER,
-            sleep_score_stress INTEGER, sleep_score_awake_count INTEGER,
-            sleep_score_rem_percentage INTEGER, sleep_score_restlessness INTEGER,
-            sleep_score_light_percentage INTEGER, sleep_score_deep_percentage INTEGER,
-            average_spo2 REAL, lowest_spo2 INTEGER, highest_spo2 INTEGER,
-            average_spo2_hr_sleep REAL,
-            average_respiration REAL, lowest_respiration REAL, highest_respiration REAL,
-            avg_sleep_stress REAL,
-            sleep_score_feedback TEXT, sleep_score_insight TEXT,
-            synced_at TEXT DEFAULT (datetime('now'))
-        );
-        CREATE TABLE IF NOT EXISTS daily_stress (
-            calendar_date TEXT PRIMARY KEY,
-            overall_stress_level INTEGER,
-            rest_stress_duration INTEGER, low_stress_duration INTEGER,
-            medium_stress_duration INTEGER, high_stress_duration INTEGER,
-            synced_at TEXT DEFAULT (datetime('now'))
-        );
-        CREATE TABLE IF NOT EXISTS daily_hrv (
-            calendar_date TEXT PRIMARY KEY,
-            weekly_avg INTEGER, last_night_avg INTEGER, last_night_5_min_high INTEGER,
-            baseline_low_upper INTEGER, baseline_balanced_low INTEGER,
-            baseline_balanced_upper INTEGER, baseline_marker_value REAL,
-            status TEXT, feedback_phrase TEXT,
-            synced_at TEXT DEFAULT (datetime('now'))
-        );
-        CREATE TABLE IF NOT EXISTS daily_steps (
-            calendar_date TEXT PRIMARY KEY,
-            total_steps INTEGER, total_distance INTEGER, step_goal INTEGER,
-            synced_at TEXT DEFAULT (datetime('now'))
-        );
-        CREATE TABLE IF NOT EXISTS daily_hydration (
-            calendar_date TEXT PRIMARY KEY,
-            value_in_ml REAL, goal_in_ml REAL,
-            synced_at TEXT DEFAULT (datetime('now'))
-        );
-        CREATE TABLE IF NOT EXISTS daily_intensity_minutes (
-            calendar_date TEXT PRIMARY KEY,
-            weekly_goal INTEGER, moderate_value INTEGER, vigorous_value INTEGER,
-            synced_at TEXT DEFAULT (datetime('now'))
-        );
-        CREATE TABLE IF NOT EXISTS body_composition (
-            sample_pk INTEGER PRIMARY KEY,
-            calendar_date TEXT, weight REAL, bmi REAL, body_fat REAL,
-            body_water REAL, bone_mass INTEGER, muscle_mass INTEGER,
-            physique_rating REAL, visceral_fat REAL, metabolic_age INTEGER,
-            source_type TEXT, timestamp_gmt BIGINT,
-            synced_at TEXT DEFAULT (datetime('now'))
-        );
-        CREATE TABLE IF NOT EXISTS daily_body_battery (
-            calendar_date TEXT PRIMARY KEY,
-            max_stress_level INTEGER, avg_stress_level INTEGER,
-            raw_json TEXT, synced_at TEXT DEFAULT (datetime('now'))
-        );
-        CREATE TABLE IF NOT EXISTS daily_heart_rate (
-            calendar_date TEXT PRIMARY KEY,
-            resting_heart_rate INTEGER, max_heart_rate INTEGER, min_heart_rate INTEGER,
-            raw_json TEXT, synced_at TEXT DEFAULT (datetime('now'))
-        );
-        CREATE TABLE IF NOT EXISTS daily_respiration (
-            calendar_date TEXT PRIMARY KEY,
-            avg_waking_respiration REAL, highest_respiration REAL, lowest_respiration REAL,
-            raw_json TEXT, synced_at TEXT DEFAULT (datetime('now'))
-        );
-        CREATE TABLE IF NOT EXISTS daily_spo2 (
-            calendar_date TEXT PRIMARY KEY,
-            avg_spo2 REAL, lowest_spo2 REAL, latest_spo2 REAL,
-            raw_json TEXT, synced_at TEXT DEFAULT (datetime('now'))
-        );
-        CREATE TABLE IF NOT EXISTS daily_floors (
-            calendar_date TEXT PRIMARY KEY,
-            total_floors INTEGER, floor_goal INTEGER,
-            raw_json TEXT, synced_at TEXT DEFAULT (datetime('now'))
-        );
-        CREATE TABLE IF NOT EXISTS training_readiness (
-            calendar_date TEXT PRIMARY KEY,
-            score INTEGER, level TEXT,
-            raw_json TEXT, synced_at TEXT DEFAULT (datetime('now'))
-        );
-        CREATE TABLE IF NOT EXISTS training_status (
-            calendar_date TEXT PRIMARY KEY,
-            raw_json TEXT, synced_at TEXT DEFAULT (datetime('now'))
-        );
-        CREATE TABLE IF NOT EXISTS blood_pressure (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            calendar_date TEXT, systolic INTEGER, diastolic INTEGER,
-            pulse INTEGER, timestamp_gmt TEXT, notes TEXT, source_type TEXT,
-            synced_at TEXT DEFAULT (datetime('now'))
-        );
-        CREATE TABLE IF NOT EXISTS daily_max_metrics (
-            calendar_date TEXT PRIMARY KEY,
-            raw_json TEXT, synced_at TEXT DEFAULT (datetime('now'))
-        );
-        CREATE TABLE IF NOT EXISTS fitness_age (
-            calendar_date TEXT PRIMARY KEY,
-            raw_json TEXT, synced_at TEXT DEFAULT (datetime('now'))
-        );
-        CREATE TABLE IF NOT EXISTS race_predictions (
-            calendar_date TEXT PRIMARY KEY,
-            raw_json TEXT, synced_at TEXT DEFAULT (datetime('now'))
-        );
-        CREATE TABLE IF NOT EXISTS endurance_score (
-            calendar_date TEXT PRIMARY KEY,
-            raw_json TEXT, synced_at TEXT DEFAULT (datetime('now'))
-        );
-        CREATE TABLE IF NOT EXISTS hill_score (
-            calendar_date TEXT PRIMARY KEY,
-            raw_json TEXT, synced_at TEXT DEFAULT (datetime('now'))
-        );
-        CREATE TABLE IF NOT EXISTS devices (
-            device_id BIGINT PRIMARY KEY,
-            device_name TEXT, device_type TEXT,
-            raw_json TEXT, synced_at TEXT DEFAULT (datetime('now'))
-        );
-        CREATE INDEX IF NOT EXISTS idx_body_composition_date ON body_composition(calendar_date);
-        CREATE INDEX IF NOT EXISTS idx_blood_pressure_date ON blood_pressure(calendar_date);
-        """
-        
+        if not SCHEMA_PATH.exists():
+            print(f"❌ Schema file not found: {SCHEMA_PATH}")
+            raise FileNotFoundError(SCHEMA_PATH)
+
         try:
             conn = sqlite3.connect(self.db_path)
             cursor = conn.cursor()
-            
-            # Execute the schema
-            cursor.executescript(schema_sql)
-            
+
+            # schema_garmin.sql is the single source of truth for the schema.
+            # Every statement is IF NOT EXISTS, so this is safe to re-run.
+            cursor.executescript(SCHEMA_PATH.read_text())
+
             conn.commit()
             conn.close()
             print("✅ Garmin database initialized successfully")
-            
+
         except sqlite3.Error as e:
             print(f"❌ Database error: {e}")
             raise
-    
+
     def authenticate(self):
         """Authenticate with Garmin Connect using garth."""
         email = os.getenv('GARMIN_EMAIL')
@@ -855,8 +567,50 @@ class GarminConnectDownloader:
             print(f"  Average HR: {hr_stats[1]:.0f} bpm" if hr_stats[1] else "  Average HR: N/A")
             print(f"  Max HR: {hr_stats[2]:.0f} bpm" if hr_stats[2] else "  Max HR: N/A")
         
+        self._print_health_coverage()
+
         print(f"\n💾 Database: {self.db_path}")
-    
+
+    def _print_health_coverage(self):
+        """
+        Report row counts for every health dataset, calling out empty ones.
+
+        An endpoint that fails on every run leaves its table empty, which is
+        otherwise invisible — the per-run warning scrolls past and the data is
+        simply never there. Listing empty datasets here makes that obvious.
+        """
+        health_tables = [
+            'daily_sleep', 'daily_stress', 'daily_hrv', 'daily_steps',
+            'daily_hydration', 'daily_intensity_minutes', 'body_composition',
+            'daily_body_battery', 'daily_heart_rate', 'daily_respiration',
+            'daily_spo2', 'daily_floors', 'training_readiness',
+            'training_status', 'blood_pressure', 'daily_max_metrics',
+            'fitness_age', 'race_predictions', 'endurance_score',
+            'hill_score', 'devices',
+        ]
+
+        conn = sqlite3.connect(self.db_path)
+        cursor = conn.cursor()
+        populated, empty = [], []
+        for table in health_tables:
+            try:
+                n = cursor.execute(f"SELECT COUNT(*) FROM {table}").fetchone()[0]
+            except sqlite3.Error:
+                continue
+            (populated if n else empty).append((table, n))
+        conn.close()
+
+        print(f"\n🩺 Health data coverage:")
+        for table, n in populated:
+            print(f"  {table:28s} {n:>6} rows")
+
+        if empty:
+            print(f"\n⚠️  Empty datasets — these synced nothing:")
+            for table, _ in empty:
+                print(f"  {table}")
+            print("  If a dataset should have data, re-run and check the warning")
+            print("  printed for it above; the endpoint is likely failing.")
+
     def download_all_activities(self, batch_size: int = 100):
         """Download all activities in batches."""
         print("📥 Starting to download ALL Garmin Connect activities...")
@@ -933,9 +687,17 @@ class GarminConnectDownloader:
             conn.close()
 
     def _day_by_day(self, label, start, end, fetch_fn):
-        """Iterate day-by-day, calling fetch_fn(current_date) for each day."""
+        """
+        Iterate day-by-day, calling fetch_fn(current_date) for each day.
+
+        A day that raises is skipped so one bad day never aborts the sync, but
+        the failures are counted and summarised at the end. Swallowing them
+        silently makes a broken endpoint look identical to "no data recorded",
+        which is how a dataset can quietly stay empty forever.
+        """
         current = start
         count = 0
+        failures = {}
         total = (end - start).days + 1
         while current <= end:
             try:
@@ -949,14 +711,21 @@ class GarminConnectDownloader:
                     try:
                         fetch_fn(current)
                         count += 1
-                    except Exception:
-                        pass
-                # Silently skip days with no data
+                    except Exception as retry_err:
+                        failures[str(retry_err)[:120]] = failures.get(str(retry_err)[:120], 0) + 1
+                else:
+                    failures[err[:120]] = failures.get(err[:120], 0) + 1
             if count % 50 == 0 and count > 0:
                 print(f"  📝 {label}: {count}/{total} days...")
             current += timedelta(days=1)
             time.sleep(0.1)  # Be gentle with the API
+
         print(f"  ✅ {label}: {count} days synced")
+        if failures:
+            skipped = sum(failures.values())
+            print(f"  ⚠️  {label}: {skipped}/{total} days skipped. Most common reasons:")
+            for msg, n in sorted(failures.items(), key=lambda kv: -kv[1])[:3]:
+                print(f"       ({n}×) {msg}")
 
     def download_health_data(self, days_back=None):
         """Download all health and wellness data."""

@@ -18,10 +18,14 @@ CREATE TABLE IF NOT EXISTS activities (
     activity_type_id INTEGER,
     activity_type_key VARCHAR(50),
     activity_type_parent_id INTEGER,
+    activity_type_is_hidden BOOLEAN,
+    activity_type_restricted BOOLEAN,
+    activity_type_trimmable BOOLEAN,
     sport_type_id INTEGER,
     event_type_id INTEGER,
     event_type_key VARCHAR(50),
-    
+    event_type_sort_order INTEGER,
+
     -- Duration (seconds)
     duration REAL,
     elapsed_duration REAL,
@@ -444,10 +448,34 @@ CREATE TABLE IF NOT EXISTS devices (
 CREATE INDEX IF NOT EXISTS idx_body_composition_date ON body_composition(calendar_date);
 CREATE INDEX IF NOT EXISTS idx_blood_pressure_date ON blood_pressure(calendar_date);
 
--- View for daily health summary joining key metrics
-CREATE VIEW IF NOT EXISTS daily_health_summary AS
+-- Views are derived objects, so they are dropped and recreated on every run.
+-- CREATE VIEW IF NOT EXISTS would silently keep a stale definition in any
+-- database that already exists, meaning view fixes would never take effect.
+
+-- View for daily health summary joining key metrics.
+-- Driven by a UNION of every source table's dates rather than by daily_steps,
+-- so a day with sleep or HRV but no step record still appears.
+DROP VIEW IF EXISTS daily_health_summary;
+CREATE VIEW daily_health_summary AS
+WITH all_dates AS (
+    SELECT calendar_date FROM daily_steps
+    UNION
+    SELECT calendar_date FROM daily_stress
+    UNION
+    SELECT calendar_date FROM daily_hrv
+    UNION
+    SELECT calendar_date FROM daily_sleep
+    UNION
+    SELECT calendar_date FROM daily_body_battery
+    UNION
+    SELECT calendar_date FROM daily_heart_rate
+    UNION
+    SELECT calendar_date FROM daily_intensity_minutes
+    UNION
+    SELECT calendar_date FROM daily_hydration
+)
 SELECT
-    s.calendar_date,
+    d.calendar_date,
     s.total_steps,
     s.step_goal,
     st.overall_stress_level,
@@ -463,18 +491,21 @@ SELECT
     im.vigorous_value as vigorous_intensity_min,
     hy.value_in_ml as hydration_ml,
     hy.goal_in_ml as hydration_goal_ml
-FROM daily_steps s
-LEFT JOIN daily_stress st ON s.calendar_date = st.calendar_date
-LEFT JOIN daily_hrv h ON s.calendar_date = h.calendar_date
-LEFT JOIN daily_sleep sl ON s.calendar_date = sl.calendar_date
-LEFT JOIN daily_body_battery bb ON s.calendar_date = bb.calendar_date
-LEFT JOIN daily_heart_rate hr ON s.calendar_date = hr.calendar_date
-LEFT JOIN daily_intensity_minutes im ON s.calendar_date = im.calendar_date
-LEFT JOIN daily_hydration hy ON s.calendar_date = hy.calendar_date
-ORDER BY s.calendar_date DESC;
+FROM all_dates d
+LEFT JOIN daily_steps s ON d.calendar_date = s.calendar_date
+LEFT JOIN daily_stress st ON d.calendar_date = st.calendar_date
+LEFT JOIN daily_hrv h ON d.calendar_date = h.calendar_date
+LEFT JOIN daily_sleep sl ON d.calendar_date = sl.calendar_date
+LEFT JOIN daily_body_battery bb ON d.calendar_date = bb.calendar_date
+LEFT JOIN daily_heart_rate hr ON d.calendar_date = hr.calendar_date
+LEFT JOIN daily_intensity_minutes im ON d.calendar_date = im.calendar_date
+LEFT JOIN daily_hydration hy ON d.calendar_date = hy.calendar_date
+WHERE d.calendar_date IS NOT NULL
+ORDER BY d.calendar_date DESC;
 
 -- View for activity summary with calculated fields
-CREATE VIEW IF NOT EXISTS activity_summary AS
+DROP VIEW IF EXISTS activity_summary;
+CREATE VIEW activity_summary AS
 SELECT 
     activity_id,
     activity_name,
