@@ -123,6 +123,69 @@ Connect from any MCP client using:
 
 See [Deployment](#-deployment) for production setup with systemd.
 
+### REST API
+
+HTTP mode also serves a small REST API under `/api/v1`, using the same bearer
+token. It carries only what MCP cannot: MCP tools answer with text, which is
+the wrong shape for a binary file. Reading activity data stays on the MCP side.
+
+| Method | Path | Purpose |
+|---|---|---|
+| `GET` | `/api/v1/health` | Liveness probe. Unauthenticated, touches nothing |
+| `GET` | `/api/v1/activities/{id}/file` | The original FIT recording, as bytes |
+| `GET` | `/api/v1/upload/health` | Whether the Garmin session is usable |
+| `POST` | `/api/v1/upload/fit` | Import a FIT file into Garmin Connect |
+
+```bash
+# Download an activity's original recording
+curl -H "Authorization: Bearer $TOKEN" -o activity.fit \
+  "http://localhost:8080/api/v1/activities/24010567666/file"
+
+# Upload a FIT file
+curl -X POST -H "Authorization: Bearer $TOKEN" \
+  -F "file=@activity.fit" \
+  "http://localhost:8080/api/v1/upload/fit"
+```
+
+The upload body may be multipart with a `file` part, as above, or the raw bytes
+with any other content type.
+
+**Downloading.** Straight from Garmin, not from the local database — the
+database holds summaries, and the point of this endpoint is the recording
+itself. Garmin serves it as a ZIP wrapping the `.fit`, though some activities
+come back as a bare FIT; both are unwrapped. The response carries
+`X-Garmin-Sha256`. A 404 means Garmin has no such activity, and a 503 means
+Garmin could not be reached — the same fetch and unwrap `export_fit.py` uses,
+so the CLI and the API cannot drift apart about what Garmin actually serves.
+
+**Uploading.** This is the one write path here, and it exists so that callers
+which push activities into Garmin — [`coros-garmin-bridge`](https://github.com/benniblau/coros-garmin-bridge),
+principally — do not each carry their own copy of garth, their own session file
+and their own guesses about what Garmin's answer means. See `garmin_files.py`.
+
+The answer is 200 for anything Garmin actually decided, with the verdict in
+`status`:
+
+| `status` | Meaning |
+|---|---|
+| `uploaded` | Garmin took it. `activity_id` and `upload_id` when reported |
+| `duplicate` | Garmin already has this activity (HTTP 409, or said so in the body) |
+| `failed` | Garmin refused it; `message` carries Garmin's own words |
+
+A 4xx means the request was wrong — no file, not a FIT file, bad token. A 503
+means Garmin never answered. That split is what lets a caller tell "this file
+will never work" from "try again later" without parsing prose.
+
+Note that Garmin usually answers an upload with **202 and no import result**,
+so a successful upload commonly reports `uploaded` with no `activity_id`.
+Resolving the activity id needs a follow-up poll of the activity list.
+
+`/api/v1/upload/health` is separate from `/api/v1/health` because it costs a
+session probe against Garmin and needs credentials, whereas `/api/v1/health`
+must stay cheap enough to poll. Use it as a preflight before a batch: finding
+out there that Garmin is unreachable costs nothing, whereas finding out
+per-file burns a retry on every file.
+
 ## 📊 Database Schema
 
 The SQLite database stores comprehensive activity data:
@@ -202,7 +265,9 @@ Once connected to Claude Desktop, you can ask:
 ```
 garmin-mcp/
 ├── garmin_connect_downloader.py    # Main downloader script
-├── mcp_server.py                   # MCP server (STDIO + HTTP transport)
+├── mcp_server.py                   # MCP server (STDIO + HTTP transport, REST API)
+├── garmin_files.py                 # Garmin session, FIT download and upload
+├── export_fit.py                   # CLI: bulk-export originals into exports/
 ├── schema/
 │   └── schema_garmin.sql           # Database schema (single source of truth)
 ├── deploy/

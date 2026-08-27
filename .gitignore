@@ -12,6 +12,16 @@
 *.db-shm
 *.db-wal
 
+# Exported activity files — personal training data, never commit
+exports/
+*.fit
+*.tcx
+*.gpx
+*.zip
+
+# Run logs — they quote file paths and account data
+*.log
+
 # Python
 .venv/
 __pycache__/

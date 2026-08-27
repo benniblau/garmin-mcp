@@ -4,6 +4,20 @@ MCP Server for Garmin Connect Activities Database
 
 This server exposes the Garmin activities SQLite database to MCP clients,
 providing tools and resources for querying fitness data.
+
+In HTTP mode it also serves a small REST API under /api/v1, bearer-authenticated
+with the same token as the MCP endpoint:
+
+    /api/v1/health                        liveness probe, unauthenticated
+    /api/v1/activities/{id}/file          the original FIT recording, as bytes
+    /api/v1/upload/health                 whether the Garmin session is usable
+    /api/v1/upload/fit                    import a FIT file into Garmin Connect
+
+These carry what MCP cannot: MCP tools answer with text, which is the wrong
+shape for a binary file. They also mean callers moving activity files — the
+coros-garmin-bridge, principally — do not each carry their own copy of garth,
+their own session file and their own guesses about what Garmin's answer means.
+See garmin_files.py.
 """
 
 import argparse
@@ -38,6 +52,16 @@ DB_PATH = os.getenv("GARMIN_DB_PATH", DEFAULT_DB_PATH)
 
 # Mount point for the streamable HTTP transport (no trailing slash).
 MCP_PATH = "/mcp"
+API_PREFIX = "/api/v1"
+
+# A FIT file carries its signature at bytes 8..12. Checking it here means a
+# caller that sends the wrong bytes finds out from us, cheaply, rather than
+# from Garmin several seconds later in less certain terms.
+FIT_SIGNATURE = b".FIT"
+
+# Guards the upload route against a runaway caller. Real activity files are
+# well under this — a 4-hour recording with every sensor is ~1 MB.
+MAX_UPLOAD_BYTES = 32 * 1024 * 1024
 
 # Columns that may be interpolated into an ORDER BY clause by query_activities.
 ALLOWED_ACTIVITY_ORDER_COLUMNS = {
@@ -825,6 +849,157 @@ async def get_health_trends(
         }, indent=2, default=str)
 
 
+# ─────────────────────────────────────────────────────────────────────────────
+# REST API
+# ─────────────────────────────────────────────────────────────────────────────
+
+def build_rest_routes():
+    """
+    Conventional REST endpoints, served alongside the MCP transport.
+
+    Only what cannot be done over MCP lives here: MCP tools answer with text,
+    which is the wrong shape for a binary file. Reading activity data stays on
+    the MCP side.
+    """
+    from starlette.responses import JSONResponse, Response
+    from starlette.routing import Route
+
+    import garmin_files
+
+    def ok(payload, status: int = 200):
+        return JSONResponse(json.loads(json.dumps(payload, default=str)),
+                            status_code=status)
+
+    def err(message: str, status: int = 400):
+        return JSONResponse({"error": message}, status_code=status)
+
+    def guard(handler):
+        """Reject unauthenticated REST calls before doing any work."""
+        async def wrapped(request):
+            if not getattr(request.user, "is_authenticated", False):
+                return err("Unauthorized", 401)
+            try:
+                return await handler(request)
+            except ValueError as e:
+                return err(str(e), 400)
+            except garmin_files.GarminError as e:
+                # Garmin could not be reached, or the session could not be
+                # renewed, or it refused to export. A verdict on the far end,
+                # not on this request: the caller should retry rather than
+                # write it down as a rejection.
+                status = getattr(e, "status", 503)
+                if status >= 500:
+                    logger.warning(f"Garmin unavailable: {e}")
+                return err(str(e), status)
+            except Exception as e:                       # noqa: BLE001
+                logger.exception("REST handler failed")
+                return err(str(e), 500)
+        return wrapped
+
+    async def health(request):
+        """Liveness probe — intentionally unauthenticated, touches nothing."""
+        try:
+            with get_db_connection() as conn:
+                n = conn.execute("SELECT COUNT(*) FROM activities").fetchone()[0]
+            return ok({"status": "ok", "database": DB_PATH, "activities": n})
+        except sqlite3.Error as e:
+            return err(f"database unavailable: {e}", 503)
+
+    @guard
+    async def get_activity_file(request):
+        """
+        Stream an activity's originally recorded FIT file from Garmin.
+
+        Straight from Garmin, not from the local database — the database holds
+        summaries, and the point of this endpoint is the recording itself.
+        """
+        activity_id = request.path_params["activity_id"]
+        try:
+            activity_id = int(activity_id)
+        except ValueError:
+            return err(f"activity_id must be an integer, got {activity_id!r}")
+
+        data, digest = garmin_files.fetch_activity_file(activity_id)
+        return Response(
+            data,
+            media_type="application/vnd.ant.fit",
+            headers={
+                "Content-Disposition": f'attachment; filename="{activity_id}.fit"',
+                # So a caller can record what it received without hashing it
+                # again, and can tell a re-export from a changed recording.
+                "X-Garmin-Sha256": digest,
+                "X-Garmin-Activity-Id": str(activity_id),
+            },
+        )
+
+    @guard
+    async def upload_health(request):
+        """
+        Whether an upload would get as far as Garmin.
+
+        Separate from /health because it costs a session probe against Garmin
+        and needs credentials, whereas /health must stay cheap enough to poll.
+        Callers use this as a preflight: finding out here that Garmin is
+        unreachable costs nothing, whereas finding out per-file burns a retry
+        on every file in the batch.
+        """
+        garmin_files.authenticate()
+        return ok({"status": "ok", "garmin": "authenticated"})
+
+    @guard
+    async def upload_fit(request):
+        """
+        Import a FIT file into Garmin Connect.
+
+        Accepts either a multipart body with a `file` part, or the raw bytes
+        with any other content type.
+
+        Answers 200 for anything Garmin actually decided — including a refusal
+        — with the verdict in `status` (uploaded | duplicate | failed). A 4xx
+        means the request was wrong, and a 5xx means Garmin never answered.
+        That split is what lets a caller tell "this file will never work" from
+        "try again later" without parsing prose.
+        """
+        content_type = request.headers.get("content-type", "")
+        filename = request.query_params.get("filename") or "activity.fit"
+
+        if content_type.startswith("multipart/form-data"):
+            form = await request.form()
+            part = form.get("file")
+            if part is None:
+                return err("multipart body has no `file` part")
+            data = await part.read() if hasattr(part, "read") else bytes(part)
+            filename = getattr(part, "filename", None) or filename
+        else:
+            data = await request.body()
+
+        if not data:
+            return err("Empty request body — send a FIT file")
+        if len(data) > MAX_UPLOAD_BYTES:
+            return err(f"File is {len(data)} bytes, over the "
+                       f"{MAX_UPLOAD_BYTES} byte limit", 413)
+        if len(data) < 14 or data[8:12] != FIT_SIGNATURE:
+            return err(f"Not a FIT file ({len(data)} bytes, "
+                       f"starts {data[:16]!r})")
+
+        result = garmin_files.upload_fit(data, filename)
+        logger.info(f"upload {filename}: {result.status} "
+                    f"(activity {result.activity_id}, upload {result.upload_id})")
+        return ok(result.to_dict())
+
+    p = API_PREFIX
+    return [
+        Route(f"{p}/health", health, methods=["GET"]),
+        Route(f"{p}/activities/{{activity_id}}/file", get_activity_file, methods=["GET"]),
+        Route(f"{p}/upload/health", upload_health, methods=["GET"]),
+        Route(f"{p}/upload/fit", upload_fit, methods=["POST"]),
+    ]
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Transport
+# ─────────────────────────────────────────────────────────────────────────────
+
 def run_stdio():
     """Run the MCP server over STDIO transport."""
     if not os.path.exists(DB_PATH):
@@ -898,9 +1073,7 @@ def main_http():
     )
 
     app = Starlette(
-        routes=[
-            Mount(MCP_PATH, app=mcp_app),
-        ],
+        routes=[Mount(MCP_PATH, app=mcp_app)] + build_rest_routes(),
         middleware=[
             Middleware(AuthenticationMiddleware, backend=BearerAuthBackend(verifier)),
         ],
@@ -928,6 +1101,8 @@ def main_http():
         return wrapped
 
     logger.info(f"Starting Garmin MCP HTTP server on {host}:{port}")
+    logger.info(f"  MCP  : http://{host}:{port}{MCP_PATH}  (and {MCP_PATH}/)")
+    logger.info(f"  REST : http://{host}:{port}{API_PREFIX}/")
     uvicorn.run(_accept_bare_mcp_path(app), host=host, port=port, log_level="info")
 
 

@@ -4,3 +4,6 @@ garth>=0.4.0
 mcp>=1.0.0
 uvicorn>=0.30.0
 starlette>=0.40.0
+# Parses the multipart bodies the /api/v1/upload/fit route accepts. Already
+# pulled in by mcp, but named here because this server now uses it directly.
+python-multipart>=0.0.9

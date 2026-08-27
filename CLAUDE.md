@@ -49,6 +49,36 @@ Two main components, both pure Python with no framework beyond the MCP SDK:
 - HTTP mode serves both `/mcp` and `/mcp/` (the bare path is rewritten, not redirected)
 - `deploy/garmin-mcp.service` — systemd unit for production deployment on Linux VPS
 
+### `garmin_files.py` — Moving activity files in and out
+- Owns the Garmin session (`authenticate()`), so a server importing it never
+  inherits a CLI's `sys.exit`: a missing credential fails one request rather
+  than taking the process down. `export_fit.py` delegates here and adds the
+  exit itself.
+- `fetch_activity_file()` — `/download-service/files/activity/{id}` serves a ZIP
+  wrapping the .fit, but **some activities come back as a bare FIT**; both are
+  unwrapped. `export_fit.py` uses this too, so the CLI and the REST API cannot
+  drift apart about what Garmin actually serves.
+- `upload_fit()` — `/upload-service/upload/fit`, plus the classification of
+  Garmin's answer. **409 means duplicate**, and garth calls `raise_for_status()`
+  so it arrives as an exception — unwrap `err.error.response.status_code`.
+  Garmin usually answers **202 with no import result**, so a success commonly
+  reports `uploaded` with no `activity_id`; resolving it needs a follow-up poll.
+- garth's default timeout is **10 seconds for every request** and it passes that
+  to requests itself, so a `timeout=` kwarg on `garth.client.post()` collides
+  with it and raises `TypeError`. Use `garth.client.configure(timeout=...)`.
+- `garth.upload()`-style calls need a real file handle — a bare `BytesIO` fails
+  because garth reads `fp.name`.
+- `GarminError.status` is what the REST layer reports: 503 by default, but
+  Garmin's own status when Garmin answered, so an unknown activity is a 404 to
+  the caller rather than a claim that Garmin is down.
+
+### REST API (`/api/v1`, HTTP mode only)
+Carries only what MCP cannot — binary files and the one write path:
+`/health` (unauthenticated), `/activities/{id}/file`, `/upload/health`,
+`/upload/fit`. `/upload/health` is separate from `/health` because it costs a
+session probe and needs credentials, whereas `/health` must stay cheap enough
+to poll; callers use it as a batch preflight.
+
 ### Database
 - SQLite with `activities` table (~90 columns) + 21 health/wellness tables
 - Health tables: `daily_sleep`, `daily_stress`, `daily_hrv`, `daily_steps`, `daily_hydration`, `daily_intensity_minutes`, `body_composition`, `daily_body_battery`, `daily_heart_rate`, `daily_respiration`, `daily_spo2`, `daily_floors`, `training_readiness`, `training_status`, `blood_pressure`, `daily_max_metrics`, `fitness_age`, `race_predictions`, `endurance_score`, `hill_score`, `devices`
