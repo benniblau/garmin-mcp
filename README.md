@@ -159,7 +159,7 @@ Garmin could not be reached — the same fetch and unwrap `export_fit.py` uses,
 so the CLI and the API cannot drift apart about what Garmin actually serves.
 
 **Uploading.** This is the one write path here, and it exists so that callers
-which push activities into Garmin — [`coros-garmin-bridge`](https://github.com/benniblau/coros-garmin-bridge),
+which push activities into Garmin — [`fit-bridge`](https://github.com/benniblau/fit-bridge),
 principally — do not each carry their own copy of garth, their own session file
 and their own guesses about what Garmin's answer means. See `garmin_files.py`.
 
