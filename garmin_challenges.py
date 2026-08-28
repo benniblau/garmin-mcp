@@ -31,6 +31,13 @@ Which listing a challenge appears in depends on what kind it is:
 
 A successful opt-in moves an expedition from `available` to `inProgress`, sets
 `userJoined` true and `joinable` false.
+
+**Expeditions are one per `challengeGroupPk`.** Group 1 is the distance trails,
+group 2 the ascent climbs. Joining one makes every other expedition in that
+group `joinable: false` until it is finished — so `available` listing something
+does not mean you can join it. Established 2026-08-28 by joining Rheinsteig
+Trail (group 1) and watching the other ten group-1 trails turn un-joinable
+while all nine group-2 climbs stayed open.
 """
 
 from datetime import date as _date
@@ -46,7 +53,7 @@ VIRTUAL_CHALLENGE = "/badgechallenge-service/virtualChallenge"
 SUMMARY_FIELDS = ("uuid", "badgeChallengeName", "badgeChallengeStatusId",
                   "badgeUnitId", "badgeProgressValue", "badgeTargetValue",
                   "userJoined", "joinable", "joinDateLocal",
-                  "startDate", "endDate", "badgeKey")
+                  "startDate", "endDate", "badgeKey", "challengeGroupPk")
 
 
 class ChallengeError(RuntimeError):

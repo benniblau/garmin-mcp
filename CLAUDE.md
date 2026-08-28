@@ -89,6 +89,14 @@ Two main components, both pure Python with no framework beyond the MCP SDK:
   `virtualChallenge/available` to `virtualChallenge/inProgress`.
 - These read Garmin live, not the mirror: progress and join state change with
   no activity recorded, so there is nothing in the database to mirror.
+- **Expeditions are one per `challengeGroupPk`** — group 1 distance trails,
+  group 2 ascent climbs. Joining one turns every other expedition in that group
+  `joinable: false` until it finishes, so `available` is not the same as
+  joinable. Found 2026-08-28 by joining Rheinsteig Trail and watching the other
+  ten group-1 trails close while all nine group-2 climbs stayed open.
+- `join_challenges.py` is the cron entry point. It joins at most one per group
+  by construction, so it takes `GARMIN_CHALLENGE_PREFER` — otherwise nine open
+  climbs are decided alphabetically, which picks Elbrus by accident.
 
 ### REST API (`/api/v1`, HTTP mode only)
 Carries only what MCP cannot — binary files and the one write path:

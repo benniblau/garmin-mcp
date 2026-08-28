@@ -219,6 +219,30 @@ Monthly and quarterly challenges arrive already joined — 42 of 42 on the
 account this was written against — so `joinable` in practice lists only the
 expeditions (Everest, Mont Blanc, Rheinsteig Trail…).
 
+**Expeditions are one per `challengeGroupPk`.** Group 1 is the distance trails,
+group 2 the ascent climbs. Joining one makes every other expedition in that
+group `joinable: false` until it is finished, so `available` listing something
+does not mean you can join it.
+
+### `join_challenges.py`
+
+A cron entry point that joins everything currently open:
+
+```bash
+python join_challenges.py --dry-run    # say what would be joined
+python join_challenges.py              # join it
+```
+
+Idempotent — it acts only on challenges Garmin reports as `joinable` and not
+yet joined, so a run with nothing to do costs two GETs and says so. Because
+expeditions are one-per-group it joins at most one per group however many are
+listed, which is why it takes a preference:
+
+| Variable | Meaning |
+|---|---|
+| `GARMIN_CHALLENGE_PREFER` | Comma-separated names, tried in order. With nine climbs open and one slot, this is what picks Everest on purpose rather than Elbrus alphabetically |
+| `GARMIN_CHALLENGE_SKIP` | Comma-separated names never to join |
+
 ## 📊 Database Schema
 
 The SQLite database stores comprehensive activity data:
@@ -301,6 +325,7 @@ garmin-mcp/
 ├── mcp_server.py                   # MCP server (STDIO + HTTP transport, REST API)
 ├── garmin_files.py                 # Garmin session, FIT download and upload
 ├── garmin_challenges.py            # Badge challenges: read, and opt in
+├── join_challenges.py              # CLI/cron: join everything open
 ├── export_fit.py                   # CLI: bulk-export originals into exports/
 ├── schema/
 │   └── schema_garmin.sql           # Database schema (single source of truth)
