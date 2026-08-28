@@ -1000,6 +1000,54 @@ def build_rest_routes():
 # Transport
 # ─────────────────────────────────────────────────────────────────────────────
 
+# ─────────────────────────────────────────────────────────────────────────────
+# Challenges
+# ─────────────────────────────────────────────────────────────────────────────
+# These read Garmin directly rather than the local mirror: a challenge's
+# progress and join state change without any activity being recorded, so there
+# is nothing in the database to mirror them. See garmin_challenges.py.
+
+@mcp.tool()
+async def list_challenges(state: str = "joinable") -> str:
+    """
+    List Garmin badge challenges by state, live from Garmin.
+
+    Args:
+        state: One of 'joinable' (expeditions not yet joined), 'in_progress'
+            (expeditions under way), 'current' (monthly and quarterly
+            challenges not yet completed), 'completed'.
+    """
+    import garmin_challenges
+    try:
+        rows = garmin_challenges.list_challenges(state)
+    except garmin_challenges.ChallengeError as e:
+        return json.dumps({"error": str(e)}, indent=2)
+    return json.dumps({"state": state, "count": len(rows), "challenges": rows},
+                      indent=2, default=str)
+
+
+@mcp.tool()
+async def join_challenge(uuid: str, join_date: str = "") -> str:
+    """
+    Join a Garmin challenge. WRITES to the account.
+
+    Garmin calls this an opt-in, and answers 204 with no body — so this reads
+    the challenge back afterwards and reports what Garmin actually thinks,
+    rather than trusting the status code.
+
+    Args:
+        uuid: The challenge uuid, from list_challenges.
+        join_date: Local day to record the join under, YYYY-MM-DD. Defaults
+            to today.
+    """
+    import garmin_challenges
+    try:
+        return json.dumps(garmin_challenges.opt_in(uuid, join_date or None),
+                          indent=2, default=str)
+    except garmin_challenges.ChallengeError as e:
+        return json.dumps({"error": str(e)}, indent=2)
+
+
 def run_stdio():
     """Run the MCP server over STDIO transport."""
     if not os.path.exists(DB_PATH):

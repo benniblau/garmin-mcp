@@ -72,6 +72,24 @@ Two main components, both pure Python with no framework beyond the MCP SDK:
   Garmin's own status when Garmin answered, so an unknown activity is a 404 to
   the caller rather than a claim that Garmin is down.
 
+### `garmin_challenges.py` — Badge challenges
+- **The join verb is `optIn`, not `join`.** `POST
+  /badgechallenge-service/badgeChallenge/{uuid}/optIn/{YYYY-MM-DD}` -> 204.
+  Captured from the Connect web app 2026-08-28 after every `/join/…`,
+  `/…/join`, `/player/…` shape 404'd, `OPTIONS` on the detail path reported
+  only `HEAD,GET,OPTIONS`, and python-garminconnect turned out to expose
+  challenges read-only. Do not go looking for it again.
+- The 204 has **no body**, so it proves nothing changed hands — `opt_in()`
+  reads the challenge back and returns Garmin's own view.
+- **An already-joined challenge answers 400**, not 204. Reported as success
+  when the read-back shows `userJoined`, so a retry after a timeout is safe.
+- A bad uuid answers 400, a well-formed unknown one 404; both map to 404.
+- Monthly/quarterly challenges arrive **already joined** (42 of 42), so
+  `joinable` lists only expeditions. Joining moves one from
+  `virtualChallenge/available` to `virtualChallenge/inProgress`.
+- These read Garmin live, not the mirror: progress and join state change with
+  no activity recorded, so there is nothing in the database to mirror.
+
 ### REST API (`/api/v1`, HTTP mode only)
 Carries only what MCP cannot — binary files and the one write path:
 `/health` (unauthenticated), `/activities/{id}/file`, `/upload/health`,

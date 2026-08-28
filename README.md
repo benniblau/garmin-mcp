@@ -186,6 +186,39 @@ must stay cheap enough to poll. Use it as a preflight before a batch: finding
 out there that Garmin is unreachable costs nothing, whereas finding out
 per-file burns a retry on every file.
 
+## 🏅 Challenges
+
+Two MCP tools read Garmin's badge challenges live — not the local mirror, since
+a challenge's progress and join state move without any activity being recorded:
+
+- `list_challenges(state)` — `joinable` (expeditions not yet joined),
+  `in_progress`, `current` (monthly/quarterly), `completed`
+- `join_challenge(uuid)` — **writes to the account**
+
+**The join verb is `optIn`, not `join`**, which is why it is not in any
+third-party client:
+
+```
+POST /badgechallenge-service/badgeChallenge/{uuid}/optIn/{YYYY-MM-DD}  -> 204
+```
+
+Captured from the Connect web app on 2026-08-28. Every `/join/…` and
+`/…/player/…` shape 404s, and `OPTIONS` on the challenge detail path reports
+only `HEAD,GET,OPTIONS`.
+
+Two behaviours worth knowing, both established by trying them:
+
+- The 204 carries **no body**, so it says only that Garmin accepted the
+  request. `join_challenge` reads the challenge back and reports what Garmin
+  actually thinks.
+- Opting into an **already-joined** challenge answers **400**, not 204. That is
+  reported as success when the read-back confirms `userJoined`, so a retry
+  after a timeout is safe.
+
+Monthly and quarterly challenges arrive already joined — 42 of 42 on the
+account this was written against — so `joinable` in practice lists only the
+expeditions (Everest, Mont Blanc, Rheinsteig Trail…).
+
 ## 📊 Database Schema
 
 The SQLite database stores comprehensive activity data:
@@ -267,6 +300,7 @@ garmin-mcp/
 ├── garmin_connect_downloader.py    # Main downloader script
 ├── mcp_server.py                   # MCP server (STDIO + HTTP transport, REST API)
 ├── garmin_files.py                 # Garmin session, FIT download and upload
+├── garmin_challenges.py            # Badge challenges: read, and opt in
 ├── export_fit.py                   # CLI: bulk-export originals into exports/
 ├── schema/
 │   └── schema_garmin.sql           # Database schema (single source of truth)
