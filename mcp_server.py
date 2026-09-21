@@ -12,6 +12,8 @@ with the same token as the MCP endpoint:
     /api/v1/activities/{id}/file          the original FIT recording, as bytes
     /api/v1/upload/health                 whether the Garmin session is usable
     /api/v1/upload/fit                    import a FIT file into Garmin Connect
+    /api/v1/activities/lookup             which activity started at ?start_time=
+    /api/v1/activities/{id}/privacy       set an activity's visibility
 
 These carry what MCP cannot: MCP tools answer with text, which is the wrong
 shape for a binary file. They also mean callers moving activity files — the
@@ -987,10 +989,50 @@ def build_rest_routes():
                     f"(activity {result.activity_id}, upload {result.upload_id})")
         return ok(result.to_dict())
 
+    @guard
+    async def lookup_activity(request):
+        """
+        Which activity started at `?start_time=` (unix seconds).
+
+        Exists because the upload route cannot say: Garmin answers an import
+        with 202 and no activity id. Straight from Garmin, not the local
+        database, which has not synced an activity uploaded a minute ago. 404
+        means Garmin has none — right after an upload, usually "not yet".
+        """
+        raw = request.query_params.get("start_time", "")
+        try:
+            start_time = int(raw)
+        except ValueError:
+            return err(f"start_time must be unix seconds, got {raw!r}")
+        return ok(garmin_files.find_activity_by_start(start_time))
+
+    @guard
+    async def set_activity_privacy(request):
+        """Set one activity's visibility. Body: {"privacy": "private"}."""
+        activity_id = request.path_params["activity_id"]
+        try:
+            activity_id = int(activity_id)
+        except ValueError:
+            return err(f"activity_id must be an integer, got {activity_id!r}")
+        try:
+            body = await request.json()
+        except ValueError:
+            return err("Body must be JSON, e.g. {\"privacy\": \"private\"}")
+        privacy = (body or {}).get("privacy") if isinstance(body, dict) else None
+        if not privacy:
+            return err("Body needs a `privacy` field")
+
+        result = garmin_files.set_privacy(activity_id, str(privacy))
+        logger.info(f"privacy {activity_id}: {privacy}")
+        return ok(result)
+
     p = API_PREFIX
     return [
         Route(f"{p}/health", health, methods=["GET"]),
+        # Before the {activity_id} routes, or "lookup" would be read as an id.
+        Route(f"{p}/activities/lookup", lookup_activity, methods=["GET"]),
         Route(f"{p}/activities/{{activity_id}}/file", get_activity_file, methods=["GET"]),
+        Route(f"{p}/activities/{{activity_id}}/privacy", set_activity_privacy, methods=["PUT"]),
         Route(f"{p}/upload/health", upload_health, methods=["GET"]),
         Route(f"{p}/upload/fit", upload_fit, methods=["POST"]),
     ]

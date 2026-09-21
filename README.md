@@ -135,6 +135,8 @@ the wrong shape for a binary file. Reading activity data stays on the MCP side.
 | `GET` | `/api/v1/activities/{id}/file` | The original FIT recording, as bytes |
 | `GET` | `/api/v1/upload/health` | Whether the Garmin session is usable |
 | `POST` | `/api/v1/upload/fit` | Import a FIT file into Garmin Connect |
+| `GET` | `/api/v1/activities/lookup?start_time=` | Which activity started at that unix second, straight from Garmin. `404` if none — after an upload, usually "not imported yet" |
+| `PUT` | `/api/v1/activities/{id}/privacy` | Set visibility. Body `{"privacy": "private"}`; one of `public`, `private`, `subscribers`, `groups` |
 
 ```bash
 # Download an activity's original recording

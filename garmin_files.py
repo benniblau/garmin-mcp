@@ -27,6 +27,13 @@ Classifying the upload answer is the fiddly part:
 
 garth raises on non-2xx, so a duplicate arrives as an exception whose status
 code has to be dug out of the wrapped response.
+
+**Privacy** — the upload endpoint answers 202 with no activity id and takes no
+visibility field, so an imported activity lands with the account's default
+visibility. Changing that is two further steps: find the activity by the
+moment it started (`find_activity_by_start`), then PUT its access rule
+(`set_privacy`). The id is not known until Garmin has finished importing, so
+the first step answers 404 for a little while after an upload.
 """
 
 import hashlib
@@ -42,6 +49,12 @@ BASE = Path(__file__).parent
 
 UPLOAD_PATH = "/upload-service/upload/fit"
 DOWNLOAD_PATH = "/download-service/files/activity/{activity_id}"
+SEARCH_PATH = "/activitylist-service/activities/search/activities"
+ACTIVITY_PATH = "/activity-service/activity/{activity_id}"
+
+# Garmin's access rules, as `accessControlRuleDTO` / the list's `privacy`
+# carries them. `subscribers` is what the web client labels "My Connections".
+PRIVACY_TYPES = {"public": 1, "private": 2, "subscribers": 3, "groups": 4}
 
 # A FIT file carries its signature at bytes 8..12.
 FIT_SIGNATURE = b".FIT"
@@ -346,3 +359,87 @@ def upload_fit(data: bytes, filename: str = "activity.fit") -> UploadResult:
                 message=_failure_message(body) or f"{type(e).__name__}: {e}")
 
     return _classify(resp)
+
+
+def find_activity_by_start(start_time: int) -> dict:
+    """
+    Find the activity that started at `start_time` (unix seconds, UTC).
+
+    The import endpoint never says which activity an upload became, so the
+    start of the recording is the only handle a caller has. The list's
+    `beginTimestamp` is that moment in milliseconds, and the match is exact to
+    the second — a near miss is a different activity, not this one.
+
+    Raises GarminError with status 404 when there is none, which right after
+    an upload usually means Garmin has not finished importing it.
+    """
+    from datetime import datetime, timedelta, timezone           # noqa: PLC0415
+
+    authenticate()
+
+    import garth                                                  # noqa: PLC0415
+
+    # The list filters by the activity's local day, so ask a day either side
+    # of the UTC one rather than guess the time zone it was recorded in.
+    day = datetime.fromtimestamp(int(start_time), tz=timezone.utc).date()
+    try:
+        found = garth.connectapi(SEARCH_PATH, params={
+            "startDate": (day - timedelta(days=1)).isoformat(),
+            "endDate": (day + timedelta(days=1)).isoformat(),
+            "limit": 100,
+        }) or []
+    except Exception as e:                                        # noqa: BLE001
+        raise GarminError(f"Garmin activity search failed: "
+                          f"{type(e).__name__}: {e}") from e
+
+    for a in found:
+        begin = a.get("beginTimestamp")
+        if begin is not None and int(begin) // 1000 == int(start_time):
+            return {
+                "activity_id": str(a.get("activityId")),
+                "name": a.get("activityName"),
+                "privacy": (a.get("privacy") or {}).get("typeKey"),
+                "device_id": a.get("deviceId"),
+                "manual": a.get("manualActivity"),
+            }
+
+    raise GarminError(f"Garmin has no activity starting at {start_time}",
+                      status=404)
+
+
+def set_privacy(activity_id: Any, privacy: str) -> dict:
+    """
+    Set who can see one activity: public | private | subscribers | groups.
+
+    The same PUT the web client sends from the padlock menu. It names only the
+    access rule, and Garmin leaves every other field alone.
+    """
+    if privacy not in PRIVACY_TYPES:
+        raise ValueError(f"privacy must be one of "
+                         f"{', '.join(PRIVACY_TYPES)}, got {privacy!r}")
+
+    authenticate()
+
+    import garth                                                  # noqa: PLC0415
+
+    try:
+        garth.client.put(
+            "connectapi", ACTIVITY_PATH.format(activity_id=activity_id),
+            json={"activityId": int(activity_id),
+                  "accessControlRuleDTO": {"typeId": PRIVACY_TYPES[privacy],
+                                           "typeKey": privacy}},
+            api=True,
+        )
+    except Exception as e:                                        # noqa: BLE001
+        status = _http_status(e)
+        if status == 404:
+            raise GarminError(f"Garmin has no activity {activity_id}",
+                              status=404) from e
+        if status is not None and status < 500:
+            raise GarminError(
+                f"Garmin refused to change the privacy of {activity_id} "
+                f"(HTTP {status})", status=status) from e
+        raise GarminError(f"Garmin privacy update failed: "
+                          f"{type(e).__name__}: {e}") from e
+
+    return {"activity_id": str(activity_id), "privacy": privacy}
