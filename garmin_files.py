@@ -2,10 +2,15 @@
 """
 Move activity files in and out of Garmin Connect.
 
-This module owns the Garmin session and both file paths, so the machine has
-exactly one credential store and one session file to keep alive whoever is
-transferring files. `export_fit.py` is the CLI on top of the download half;
-the REST API in mcp_server.py exposes both.
+This module owns both file paths, so whoever is transferring files shares one
+idea of what Garmin serves and what its answers mean. `export_fit.py` is the
+CLI on top of the download half; the REST API in mcp_server.py exposes both.
+
+**Two ways in.** Reads — the download and the lookup by start time — go
+through the Personal API key (garmin_api.py), which needs no password and no
+session. Writes — upload and privacy — still need the garth session, because
+the Personal API is read-only. `authenticate()` sets up that session and only
+the write paths call it.
 
 **Download** — /download-service/files/activity/{id} serves the originally
 recorded file as a ZIP wrapping the .fit, though some activities come back as
@@ -44,6 +49,8 @@ import zipfile
 from dataclasses import asdict, dataclass
 from pathlib import Path
 from typing import Any, Optional, Tuple
+
+import garmin_api
 
 BASE = Path(__file__).parent
 
@@ -106,7 +113,9 @@ class UploadResult:
 
 def authenticate(force: bool = False) -> None:
     """
-    Establish a Garmin session: resume the saved one, or log in fresh.
+    Establish the garth session the write paths need: resume or log in fresh.
+
+    Reads do not call this — they use the Personal API key.
 
     This module owns the session rather than borrowing it, so that a server
     importing it never inherits a CLI's habit of calling sys.exit — a missing
@@ -167,23 +176,17 @@ def fetch_activity_file(activity_id: Any) -> Tuple[bytes, str]:
     as a bare FIT — both are handled, because which one you get is not
     something the caller can predict from the activity.
     """
-    authenticate()
-
-    import garth                                                  # noqa: PLC0415
-
     try:
-        raw = garth.download(DOWNLOAD_PATH.format(activity_id=activity_id))
-    except Exception as e:                                        # noqa: BLE001
-        status = _http_status(e)
-        if status == 404:
+        raw = garmin_api.download(DOWNLOAD_PATH.format(activity_id=activity_id))
+    except garmin_api.ApiError as e:
+        if e.status == 404:
             raise GarminError(f"Garmin has no activity {activity_id}",
                               status=404) from e
-        if status is not None and status < 500:
+        if e.status < 500:
             raise GarminError(
-                f"Garmin refused to export {activity_id} (HTTP {status})",
-                status=status) from e
-        raise GarminError(f"Garmin would not export {activity_id}: "
-                          f"{type(e).__name__}: {e}") from e
+                f"Garmin refused to export {activity_id} (HTTP {e.status})",
+                status=e.status) from e
+        raise GarminError(f"Garmin would not export {activity_id}: {e}") from e
 
     if not raw:
         raise GarminError(f"Garmin returned no bytes for {activity_id}")
@@ -375,22 +378,18 @@ def find_activity_by_start(start_time: int) -> dict:
     """
     from datetime import datetime, timedelta, timezone           # noqa: PLC0415
 
-    authenticate()
-
-    import garth                                                  # noqa: PLC0415
-
     # The list filters by the activity's local day, so ask a day either side
     # of the UTC one rather than guess the time zone it was recorded in.
     day = datetime.fromtimestamp(int(start_time), tz=timezone.utc).date()
     try:
-        found = garth.connectapi(SEARCH_PATH, params={
+        found = garmin_api.get(SEARCH_PATH, params={
             "startDate": (day - timedelta(days=1)).isoformat(),
             "endDate": (day + timedelta(days=1)).isoformat(),
             "limit": 100,
         }) or []
-    except Exception as e:                                        # noqa: BLE001
-        raise GarminError(f"Garmin activity search failed: "
-                          f"{type(e).__name__}: {e}") from e
+    except garmin_api.ApiError as e:
+        raise GarminError(f"Garmin activity search failed: {e}",
+                          status=e.status if e.status < 500 else 503) from e
 
     for a in found:
         begin = a.get("beginTimestamp")

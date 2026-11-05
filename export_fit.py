@@ -25,6 +25,7 @@ from dotenv import load_dotenv
 
 load_dotenv()
 
+import garmin_api
 import garmin_files
 
 BASE = Path(__file__).parent
@@ -38,18 +39,18 @@ SLEEP_BETWEEN = 1.5
 
 def authenticate() -> None:
     """
-    Resume a saved garth session, or log in fresh.
+    Exchange the Personal API key for a token — downloads need nothing more.
 
-    The session itself belongs to garmin_files, so that the MCP server can use
-    it without inheriting the exit below. This wrapper adds what a CLI wants:
-    a line saying what happened, and a hard stop when there is no way in.
+    The token itself belongs to garmin_api, so that the MCP server can use it
+    without inheriting the exit below. This wrapper adds what a CLI wants: a
+    line saying what happened, and a hard stop when there is no way in.
     """
     try:
-        garmin_files.authenticate()
-    except garmin_files.GarminError as e:
+        garmin_api.token()
+    except garmin_api.ApiError as e:
         print(f"❌ {e}")
         sys.exit(1)
-    print("✅ Garmin session ready")
+    print("✅ Garmin Personal API token ready")
 
 
 def load_ledger() -> dict:

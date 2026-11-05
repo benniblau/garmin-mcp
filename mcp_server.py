@@ -10,16 +10,17 @@ with the same token as the MCP endpoint:
 
     /api/v1/health                        liveness probe, unauthenticated
     /api/v1/activities/{id}/file          the original FIT recording, as bytes
-    /api/v1/upload/health                 whether the Garmin session is usable
+    /api/v1/upload/health                 whether the key and the session are usable
     /api/v1/upload/fit                    import a FIT file into Garmin Connect
     /api/v1/activities/lookup             which activity started at ?start_time=
     /api/v1/activities/{id}/privacy       set an activity's visibility
 
 These carry what MCP cannot: MCP tools answer with text, which is the wrong
-shape for a binary file. They also mean callers moving activity files — the
-coros-garmin-bridge, principally — do not each carry their own copy of garth,
-their own session file and their own guesses about what Garmin's answer means.
-See garmin_files.py.
+shape for a binary file. They also mean callers moving activity files —
+fit-bridge, principally — do not each carry their own Garmin credentials and
+their own guesses about what Garmin's answer means. Reads use the Personal API
+key (garmin_api.py); the upload and privacy writes still need the garth
+session, since the Personal API is read-only. See garmin_files.py.
 """
 
 import argparse
@@ -866,6 +867,7 @@ def build_rest_routes():
     from starlette.responses import JSONResponse, Response
     from starlette.routing import Route
 
+    import garmin_api
     import garmin_files
 
     def ok(payload, status: int = 200):
@@ -903,7 +905,10 @@ def build_rest_routes():
         try:
             with get_db_connection() as conn:
                 n = conn.execute("SELECT COUNT(*) FROM activities").fetchone()[0]
-            return ok({"status": "ok", "database": DB_PATH, "activities": n})
+            return ok({"status": "ok", "database": DB_PATH, "activities": n,
+                       # Configured, not verified — checking costs a Garmin
+                       # round trip, which is what /upload/health is for.
+                       "personal_api_key": bool(garmin_api.api_key())})
         except sqlite3.Error as e:
             return err(f"database unavailable: {e}", 503)
 
@@ -937,16 +942,25 @@ def build_rest_routes():
     @guard
     async def upload_health(request):
         """
-        Whether an upload would get as far as Garmin.
+        Whether a batch would get as far as Garmin, on both ways in.
 
-        Separate from /health because it costs a session probe against Garmin
-        and needs credentials, whereas /health must stay cheap enough to poll.
-        Callers use this as a preflight: finding out here that Garmin is
-        unreachable costs nothing, whereas finding out per-file burns a retry
-        on every file in the batch.
+        Separate from /health because it costs round trips to Garmin and needs
+        credentials, whereas /health must stay cheap enough to poll. Callers
+        use this as a preflight: finding out here that Garmin is unreachable
+        costs nothing, whereas finding out per-file burns a retry on every
+        file in the batch.
+
+        The garth session (writes) decides the status, since uploading is what
+        callers preflight. The Personal API key (reads) is reported alongside,
+        with its expiry when GARMIN_PERSONAL_API_KEY_EXPIRES is set, so a key
+        running out shows up here before downloads start failing.
         """
         garmin_files.authenticate()
-        return ok({"status": "ok", "garmin": "authenticated"})
+        try:
+            reads = garmin_api.status()
+        except garmin_api.ApiError as e:
+            reads = {"personal_api": "error", "error": str(e)}
+        return ok({"status": "ok", "garmin": "authenticated", **reads})
 
     @guard
     async def upload_fit(request):

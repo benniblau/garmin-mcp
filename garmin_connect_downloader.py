@@ -2,9 +2,9 @@
 """
 Garmin Connect Activities Downloader
 
-A clean implementation using garth for authentication with MFA support.
-Downloads activities and inserts them into a database schema that matches
-the actual Garmin Connect API response structure.
+Reads through Garmin's Personal API (see garmin_api.py) — a key, no password,
+no MFA, no session file. Downloads activities and inserts them into a database
+schema that matches the Garmin Connect API response structure.
 
 Author: Generated with Claude Code
 """
@@ -19,17 +19,18 @@ from pathlib import Path
 from typing import Dict, Any, List
 from dotenv import load_dotenv
 
-# Import garth for Garmin authentication
-try:
-    import garth
-    print("✅ Garth library loaded successfully")
-except ImportError as e:
-    print(f"❌ Missing required library: {e}")
-    print("Please install: pip install garth")
-    exit(1)
-
-# Load environment variables
+# Load environment variables before garmin_api reads its configuration
 load_dotenv()
+
+import garmin_api  # noqa: E402
+
+ACTIVITY_SEARCH = '/activitylist-service/activities/search/activities'
+
+# The activity list answers 500 for a limit of 500 or more.
+PAGE_SIZE = 200
+
+# Range endpoints answer 400 past roughly a month, so ranges go in chunks.
+RANGE_CHUNK_DAYS = 28
 
 # Canonical schema — the downloader creates the database from this file so the
 # DDL lives in exactly one place.
@@ -37,7 +38,7 @@ SCHEMA_PATH = Path(__file__).parent / "schema" / "schema_garmin.sql"
 
 
 class GarminConnectDownloader:
-    """Garmin Connect activity downloader using garth authentication."""
+    """Garmin Connect downloader over the Personal API."""
 
     def __init__(self, db_path: str = os.getenv('DB_PATH')):
         self.db_path = db_path
@@ -69,161 +70,72 @@ class GarminConnectDownloader:
             raise
 
     def authenticate(self):
-        """Authenticate with Garmin Connect using garth."""
-        email = os.getenv('GARMIN_EMAIL')
-        password = os.getenv('GARMIN_PASSWORD')
-
-        if not email or not password:
-            print("❌ Please set GARMIN_EMAIL and GARMIN_PASSWORD in .env file")
-            raise ValueError("Missing Garmin credentials")
-
-        session_path = os.getenv('GARTH_SESSION_PATH', '.garth')
-        # Ensure the session directory exists so garth.save() can write to it
-        os.makedirs(session_path, exist_ok=True)
-
-        print("🔐 Authenticating with Garmin Connect...")
-
+        """Exchange the Personal API key for a token — proves the key works."""
+        print("🔐 Exchanging Garmin Personal API key for a token...")
         try:
-            # Try to resume existing session first (only if token files are present)
-            token_file = os.path.join(session_path, 'oauth1_token.json')
-            if os.path.exists(token_file):
-                try:
-                    garth.resume(session_path)
-                    print("✅ Resumed existing Garmin session")
-
-                    # Test the connection with a simple API call
-                    try:
-                        # Use activities endpoint instead of problematic userprofile endpoint
-                        activities = garth.connectapi('/activitylist-service/activities/search/activities', params={'limit': 1})
-                        print("✅ Session valid - Connection test successful")
-                        return
-                    except Exception as test_error:
-                        print(f"⚠️  Session expired: {test_error}")
-                        # Continue to fresh login
-
-                except Exception as resume_error:
-                    print(f"⚠️  Could not resume session: {resume_error}")
-            else:
-                print(f"⚠️  No saved session found at {session_path!r} — performing fresh login.")
-                print("    Tip: run the downloader locally once, then copy the session directory to production.")
-
-            # Fresh login with MFA support — retry on 429 with exponential backoff
-            print("🔑 Performing fresh Garmin login (MFA supported)...")
-            max_attempts = 3
-            for attempt in range(1, max_attempts + 1):
-                try:
-                    garth.login(email, password)
-                    break
-                except Exception as login_err:
-                    err_str = str(login_err)
-                    if '429' in err_str and attempt < max_attempts:
-                        wait = 30 * (2 ** (attempt - 1))  # 30s, 60s
-                        print(f"⚠️  Rate limited (429) — waiting {wait}s before retry {attempt + 1}/{max_attempts}...")
-                        time.sleep(wait)
-                    else:
-                        raise
-
-            # Save the session for future use
-            garth.save(session_path)
-            print("✅ Session saved successfully")
-
-            # Test the new session
-            activities = garth.connectapi('/activitylist-service/activities/search/activities', params={'limit': 1})
-            print("✅ Authentication successful - Connection test passed")
-
-        except Exception as e:
-            print(f"❌ Authentication failed: {e}")
+            garmin_api.token()
+        except garmin_api.ApiError as e:
+            print(f"❌ {e}")
             raise
-    
-    def download_activities(self, limit: int = os.getenv('GARMIN_LIMIT'), start: int = 0, days_back=None):
-        """Download activities from Garmin Connect using garth API."""
+        print("✅ Personal API token ready")
 
-        # Determine start date: CLI --days overrides env var
+    def download_activities(self, limit=None, start: int = 0, days_back=None):
+        """
+        Download activities, newest first, into the activities table.
+
+        The Personal API answers 500 for a `limit` of 500 or more, so this
+        pages through PAGE_SIZE at a time until `limit` is reached or Garmin
+        runs out. A start date (--days, else GARMIN_START_DATE) is passed to
+        Garmin as `startDate` rather than filtered here.
+        """
+        limit = int(limit if limit is not None else os.getenv('GARMIN_LIMIT') or 100)
+
         start_date = None
         if days_back is not None:
-            start_date = datetime.now() - timedelta(days=days_back)
-            print(f"📥 Downloading activities from last {days_back} days (limit: {limit})...")
-        else:
-            start_date_str = os.getenv('GARMIN_START_DATE')
-            if start_date_str:
-                try:
-                    start_date = datetime.strptime(start_date_str, '%Y-%m-%d')
-                    print(f"📥 Downloading activities from {start_date_str} onwards (limit: {limit}, start: {start})...")
-                except ValueError:
-                    print(f"⚠️  Invalid GARMIN_START_DATE format '{start_date_str}'. Expected YYYY-MM-DD. Using default.")
-                    start_date = None
-            else:
-                print(f"📥 Downloading up to {limit} activities (starting from {start})...")
-                start_date = None
-        
-        try:
-            # Build API parameters (Note: startDate parameter is not supported by this endpoint)
-            params = {'limit': limit, 'start': start}
-            
-            # Use garth to call the activities API directly
-            activities = garth.connectapi(
-                '/activitylist-service/activities/search/activities',
-                params=params
-            )
-            
-            if not activities:
-                print("📭 No activities found!")
-                return 0
-            
-            # Filter activities by start date if specified
+            start_date = (date.today() - timedelta(days=days_back)).isoformat()
+        elif os.getenv('GARMIN_START_DATE'):
+            try:
+                start_date = datetime.strptime(os.getenv('GARMIN_START_DATE'), '%Y-%m-%d').date().isoformat()
+            except ValueError:
+                print(f"⚠️  Invalid GARMIN_START_DATE {os.getenv('GARMIN_START_DATE')!r}, expected YYYY-MM-DD. Ignoring it.")
+
+        print(f"📥 Downloading up to {limit} activities"
+              + (f" since {start_date}" if start_date else "") + "...")
+
+        inserted_count = updated_count = fetched = 0
+        offset = start
+        while fetched < limit:
+            params = {'start': offset, 'limit': min(PAGE_SIZE, limit - fetched)}
             if start_date:
-                filtered_activities = []
-                for activity in activities:
-                    # Parse the activity start time
-                    activity_start_str = activity.get('startTimeLocal') or activity.get('startTimeGMT')
-                    if activity_start_str:
-                        try:
-                            # Parse the activity date (format: YYYY-MM-DD HH:MM:SS)
-                            activity_start = datetime.strptime(activity_start_str[:10], '%Y-%m-%d')
-                            if activity_start >= start_date:
-                                filtered_activities.append(activity)
-                        except ValueError:
-                            # If we can't parse the date, include the activity
-                            filtered_activities.append(activity)
-                    else:
-                        # If no start time, include the activity
-                        filtered_activities.append(activity)
-                
-                activities = filtered_activities
-                print(f"📊 Found {len(activities)} activities after date filtering")
-            else:
-                print(f"📊 Found {len(activities)} activities")
-            
-            if not activities:
-                print("📭 No activities match the date filter!")
-                return 0
-            
-            inserted_count = 0
-            updated_count = 0
-            
-            for i, activity in enumerate(activities):
+                params['startDate'] = start_date
+                params['endDate'] = date.today().isoformat()
+            page = garmin_api.get(ACTIVITY_SEARCH, params=params) or []
+            if not page:
+                break
+
+            for activity in page:
                 try:
-                    was_updated = self.insert_activity(activity)
-                    if was_updated:
+                    if self.insert_activity(activity):
                         updated_count += 1
                     else:
                         inserted_count += 1
-                    
-                    if (i + 1) % 10 == 0:
-                        print(f"📝 Processed {i + 1}/{len(activities)} activities...")
-                        
                 except Exception as e:
                     print(f"⚠️  Error processing activity {activity.get('activityId', 'unknown')}: {e}")
-                    continue
-            
-            print(f"✅ Successfully processed {len(activities)} activities")
-            print(f"   📊 New activities: {inserted_count}")
-            print(f"   🔄 Updated activities: {updated_count}")
-            return len(activities)
-            
-        except Exception as e:
-            print(f"❌ Error downloading activities: {e}")
-            raise
+
+            fetched += len(page)
+            offset += len(page)
+            print(f"📝 Processed {fetched} activities...")
+            if len(page) < params['limit']:
+                break
+
+        if not fetched:
+            print("📭 No activities found!")
+            return 0
+
+        print(f"✅ Successfully processed {fetched} activities")
+        print(f"   📊 New activities: {inserted_count}")
+        print(f"   🔄 Updated activities: {updated_count}")
+        return fetched
     
     def insert_activity(self, activity: Dict[str, Any]) -> bool:
         """Insert a single Garmin activity into the database. Returns True if updated, False if new."""
@@ -611,37 +523,12 @@ class GarminConnectDownloader:
             print("  If a dataset should have data, re-run and check the warning")
             print("  printed for it above; the endpoint is likely failing.")
 
-    def download_all_activities(self, batch_size: int = 100):
-        """Download all activities in batches."""
+    def download_all_activities(self):
+        """Download every activity — download_activities already pages."""
         print("📥 Starting to download ALL Garmin Connect activities...")
-        
-        total_downloaded = 0
-        start = 0
-        
-        while True:
-            try:
-                count = self.download_activities(limit=batch_size, start=start)
-                
-                if count == 0:
-                    print("✅ No more activities to download")
-                    break
-                
-                total_downloaded += count
-                start += batch_size
-                
-                print(f"📊 Downloaded {total_downloaded} activities so far...")
-                
-                # If we got fewer than the batch size, we're done
-                if count < batch_size:
-                    print("✅ Reached end of activities")
-                    break
-                    
-            except Exception as e:
-                print(f"❌ Error during batch download: {e}")
-                break
-        
-        print(f"🎉 Total activities downloaded: {total_downloaded}")
-        return total_downloaded
+        total = self.download_activities(limit=10**9, days_back=None)
+        print(f"🎉 Total activities downloaded: {total}")
+        return total
 
     # =========================================================================
     # Health & Wellness Data Download Methods
@@ -660,16 +547,6 @@ class GarminConnectDownloader:
         end = date.today()
         return start, end
 
-    def _get_display_name(self):
-        """Get the Garmin display name for API calls that require it."""
-        if not hasattr(self, '_display_name'):
-            try:
-                profile = garth.connectapi('/userprofile-service/socialProfile')
-                self._display_name = profile.get('displayName', '')
-            except Exception:
-                self._display_name = ''
-        return self._display_name
-
     def _upsert(self, table, data, pk='calendar_date'):
         """Generic upsert helper for health data."""
         if not data:
@@ -686,294 +563,272 @@ class GarminConnectDownloader:
         finally:
             conn.close()
 
-    def _day_by_day(self, label, start, end, fetch_fn):
+    def _attempt(self, fn, arg, failures):
         """
-        Iterate day-by-day, calling fetch_fn(current_date) for each day.
+        Run fn(arg), retrying once after a pause if Garmin rate-limits.
 
-        A day that raises is skipped so one bad day never aborts the sync, but
-        the failures are counted and summarised at the end. Swallowing them
-        silently makes a broken endpoint look identical to "no data recorded",
-        which is how a dataset can quietly stay empty forever.
+        A failure is counted rather than raised so one bad day or chunk never
+        aborts the sync — but counted, and summarised by the caller, because
+        swallowing it silently makes a broken endpoint look identical to "no
+        data recorded", which is how a dataset can quietly stay empty forever.
+        Returns what fn returned, or None on failure.
         """
-        current = start
-        count = 0
-        failures = {}
-        total = (end - start).days + 1
-        while current <= end:
+        for attempt in (0, 1):
             try:
-                fetch_fn(current)
-                count += 1
+                return fn(arg)
             except Exception as e:
                 err = str(e)
-                if '429' in err or 'Too Many' in err:
-                    print(f"  ⏳ Rate limited, waiting 60s...")
+                if attempt == 0 and ('429' in err or 'Too Many' in err):
+                    print("  ⏳ Rate limited, waiting 60s...")
                     time.sleep(60)
-                    try:
-                        fetch_fn(current)
-                        count += 1
-                    except Exception as retry_err:
-                        failures[str(retry_err)[:120]] = failures.get(str(retry_err)[:120], 0) + 1
-                else:
-                    failures[err[:120]] = failures.get(err[:120], 0) + 1
-            if count % 50 == 0 and count > 0:
-                print(f"  📝 {label}: {count}/{total} days...")
-            current += timedelta(days=1)
-            time.sleep(0.1)  # Be gentle with the API
+                    continue
+                failures[err[:120]] = failures.get(err[:120], 0) + 1
+                return None
 
-        print(f"  ✅ {label}: {count} days synced")
+    @staticmethod
+    def _report(label, count, unit, failures, total):
+        print(f"  ✅ {label}: {count} {unit} synced")
         if failures:
             skipped = sum(failures.values())
-            print(f"  ⚠️  {label}: {skipped}/{total} days skipped. Most common reasons:")
+            print(f"  ⚠️  {label}: {skipped}/{total} requests failed. Most common reasons:")
             for msg, n in sorted(failures.items(), key=lambda kv: -kv[1])[:3]:
                 print(f"       ({n}×) {msg}")
 
+    def _day_by_day(self, label, start, end, fetch_fn):
+        """Call fetch_fn(day) for each day; it returns True when it stored a row."""
+        current, count, failures = start, 0, {}
+        total = (end - start).days + 1
+        while current <= end:
+            if self._attempt(fetch_fn, current, failures):
+                count += 1
+                if count % 50 == 0:
+                    print(f"  📝 {label}: {count} days...")
+            current += timedelta(days=1)
+            time.sleep(0.1)  # Be gentle with the API
+        self._report(label, count, "days", failures, total)
+
+    def _ranged(self, label, start, end, fetch_fn, chunk_days=RANGE_CHUNK_DAYS, unit="days"):
+        """Call fetch_fn((chunk_start, chunk_end)) per chunk; it returns rows stored."""
+        chunks = []
+        while start <= end:
+            chunk_end = min(start + timedelta(days=chunk_days - 1), end)
+            chunks.append((start, chunk_end))
+            start = chunk_end + timedelta(days=1)
+        count, failures = 0, {}
+        for chunk in chunks:
+            count += self._attempt(fetch_fn, chunk, failures) or 0
+            time.sleep(0.1)
+        self._report(label, count, unit, failures, len(chunks))
+
     def download_health_data(self, days_back=None):
-        """Download all health and wellness data."""
+        """
+        Download health and wellness data over the Personal API.
+
+        Not everything the Connect web API had is offered: training readiness,
+        training status, max metrics, race predictions, endurance/hill score,
+        blood pressure and devices all answer 404 on the Personal API. Their
+        tables keep what was synced before and are no longer written.
+        """
         start, end = self._get_date_range(days_back=days_back)
         days = (end - start).days + 1
         print(f"\n📥 Downloading health data from {start} to {end} ({days} days)...")
 
-        # --- Garth Stats (bulk range queries) ---
-        self._download_daily_steps(start, end, days)
-        self._download_daily_stress(start, end, days)
-        self._download_daily_hrv(start, end, days)
-        self._download_daily_hydration(start, end, days)
-        self._download_daily_intensity_minutes(start, end, days)
-
-        # --- Garth Data (day-by-day) ---
+        # Range queries
+        self._download_daily_summaries(start, end)
+        self._download_daily_hrv(start, end)
         self._download_sleep_data(start, end)
-        self._download_body_composition(start, end, days)
-        self._download_body_battery(start, end)
+        self._download_body_composition(start, end)
 
-        # --- Garmin Connect API (day-by-day) ---
+        # Day by day — kept for the intraday series stored in raw_json
         self._download_heart_rate(start, end)
-        self._download_respiration(start, end)
         self._download_spo2(start, end)
-        self._download_floors(start, end)
-        self._download_training_readiness(start, end)
-        self._download_training_status(start, end)
-        self._download_max_metrics(start, end)
         self._download_fitness_age(start, end)
-        self._download_endurance_score(start, end)
-        self._download_hill_score(start, end)
-        self._download_race_predictions(start, end)
-        self._download_blood_pressure(start, end)
-        self._download_devices()
 
         print(f"\n🎉 Health data download complete!")
 
-    # -- Garth Stats methods (bulk) --
+    # -- Range queries --
 
-    def _download_daily_steps(self, start, end, days):
-        from typing import ClassVar
-        from pydantic.dataclasses import dataclass
-        from garth.stats._base import Stats
+    def _download_daily_summaries(self, start, end):
+        """
+        One v2 daily summary per day feeds seven tables: steps, stress,
+        intensity minutes, floors, respiration, hydration, and the stress
+        levels daily_body_battery has always carried.
 
-        # garth's DailySteps declares step_goal as non-optional int, but the
-        # API can return null — define a local version that allows None.
-        @dataclass
-        class DailyStepsFixed(Stats):
-            total_steps: int | None
-            total_distance: int | None
-            step_goal: int | None
-            _path: ClassVar[str] = "/usersummary-service/stats/steps/daily/{start}/{end}"
-            _page_size: ClassVar[int] = 28
+        Six months per call worked and a year did not, so 90-day chunks.
+        A section that is empty — a day the watch was not worn — writes
+        nothing, rather than a row of nulls over whatever is already there.
+        """
+        print(f"  📊 Downloading daily summaries...")
 
-        print(f"  📊 Downloading daily steps...")
-        try:
-            items = DailyStepsFixed.list(end, period=days)
-            for item in items:
-                self._upsert('daily_steps', {
-                    'calendar_date': str(item.calendar_date),
-                    'total_steps': item.total_steps,
-                    'total_distance': item.total_distance,
-                    'step_goal': item.step_goal,
-                })
-            print(f"  ✅ Daily steps: {len(items)} days synced")
-        except Exception as e:
-            print(f"  ⚠️ Daily steps failed: {e}")
+        def fetch(chunk):
+            body = garmin_api.get('/usersummary-service/v2/dailysummaries',
+                                  params={'startDate': str(chunk[0]), 'endDate': str(chunk[1])})
+            rows = 0
+            for day in (body or {}).get('data') or []:
+                rows += self._store_daily_summary(day)
+            return rows
 
-    def _download_daily_stress(self, start, end, days):
-        from typing import ClassVar
-        from pydantic.dataclasses import dataclass
-        from garth.stats._base import Stats
+        self._ranged("Daily summaries", start, end, fetch, chunk_days=90, unit="rows")
 
-        @dataclass
-        class DailyStressFixed(Stats):
-            overall_stress_level: int | None
-            rest_stress_duration: int | None = None
-            low_stress_duration: int | None = None
-            medium_stress_duration: int | None = None
-            high_stress_duration: int | None = None
-            _path: ClassVar[str] = "/usersummary-service/stats/stress/daily/{start}/{end}"
-            _page_size: ClassVar[int] = 28
+    def _store_daily_summary(self, day):
+        """Write one v2 daily summary into the tables it covers. Returns rows written."""
+        d = day.get('calendarDate')
+        if not d:
+            return 0
+        rows = 0
+        movement = day.get('movement') or {}
+        steps = movement.get('steps') or {}
+        stress = day.get('stress') or {}
+        im = day.get('intensityMinutes') or {}
+        up, down = movement.get('floorsAscended') or {}, movement.get('floorsDescended') or {}
+        resp = day.get('respiration') or {}
+        hyd = day.get('hydration') or {}
+        bb = day.get('bodyBattery') or {}
 
-        print(f"  📊 Downloading daily stress...")
-        try:
-            items = DailyStressFixed.list(end, period=days)
-            for item in items:
-                self._upsert('daily_stress', {
-                    'calendar_date': str(item.calendar_date),
-                    'overall_stress_level': item.overall_stress_level,
-                    'rest_stress_duration': item.rest_stress_duration,
-                    'low_stress_duration': item.low_stress_duration,
-                    'medium_stress_duration': item.medium_stress_duration,
-                    'high_stress_duration': item.high_stress_duration,
-                })
-            print(f"  ✅ Daily stress: {len(items)} days synced")
-        except Exception as e:
-            print(f"  ⚠️ Daily stress failed: {e}")
+        def ms_to_s(v):
+            return v // 1000 if v is not None else None
 
-    def _download_daily_hrv(self, start, end, days):
-        from garth.utils import camel_to_snake_dict
+        if steps.get('value') is not None:
+            self._upsert('daily_steps', {
+                'calendar_date': d,
+                'total_steps': steps.get('value'),
+                'total_distance': steps.get('distanceInMeters'),
+                'step_goal': steps.get('goal'),
+            }); rows += 1
+        if stress.get('avgLevel') is not None:
+            self._upsert('daily_stress', {
+                'calendar_date': d,
+                'overall_stress_level': stress.get('avgLevel'),
+                'rest_stress_duration': ms_to_s(stress.get('restDurationInMillis')),
+                'low_stress_duration': ms_to_s(stress.get('lowStressDurationInMillis')),
+                'medium_stress_duration': ms_to_s(stress.get('mediumStressDurationInMillis')),
+                'high_stress_duration': ms_to_s(stress.get('highStressDurationInMillis')),
+            }); rows += 1
+        if im.get('moderate') is not None or im.get('vigorous') is not None:
+            self._upsert('daily_intensity_minutes', {
+                'calendar_date': d,
+                'weekly_goal': im.get('goal'),
+                'moderate_value': im.get('moderate'),
+                'vigorous_value': im.get('vigorous'),
+            }); rows += 1
+        if up.get('value') is not None:
+            self._upsert('daily_floors', {
+                'calendar_date': d,
+                'total_floors': up.get('value'),
+                'floor_goal': up.get('goal'),
+                'raw_json': json.dumps({'floorsAscended': up, 'floorsDescended': down}),
+            }); rows += 1
+        if resp.get('avgValue') is not None:
+            self._upsert('daily_respiration', {
+                'calendar_date': d,
+                'avg_waking_respiration': resp.get('avgValue'),
+                'highest_respiration': resp.get('maxValue'),
+                'lowest_respiration': resp.get('minValue'),
+                'raw_json': json.dumps(resp),
+            }); rows += 1
+        # Garmin reports 0 consumed for every day nobody logged a drink.
+        if hyd.get('consumedInFractionalMl'):
+            self._upsert('daily_hydration', {
+                'calendar_date': d,
+                'value_in_ml': hyd.get('consumedInFractionalMl'),
+                'goal_in_ml': hyd.get('goalInFractionalMl'),
+            }); rows += 1
+        if bb or stress.get('maxLevel') is not None:
+            self._upsert('daily_body_battery', {
+                'calendar_date': d,
+                'max_stress_level': stress.get('maxLevel'),
+                'avg_stress_level': stress.get('avgLevel'),
+                'raw_json': json.dumps(bb),
+            }); rows += 1
+        return rows
+
+    def _download_daily_hrv(self, start, end):
         print(f"  📊 Downloading daily HRV...")
-        try:
-            # Call the API directly — garth's DailyHRV requires status/feedback_phrase
-            # as non-optional str, but the API can return null for some entries.
-            from datetime import timedelta
-            chunk_size = 28
-            all_items = []
-            chunk_start = start
-            while chunk_start <= end:
-                chunk_end = min(chunk_start + timedelta(days=chunk_size - 1), end)
-                response = garth.connectapi(
-                    f"/hrv-service/hrv/daily/{chunk_start}/{chunk_end}"
-                )
-                if response:
-                    summaries = camel_to_snake_dict(response).get("hrv_summaries", [])
-                    all_items.extend(summaries)
-                chunk_start = chunk_end + timedelta(days=1)
-            count = 0
-            for hrv in all_items:
+
+        def fetch(chunk):
+            body = garmin_api.get(f'/hrv-service/hrv/daily/{chunk[0]}/{chunk[1]}')
+            rows = 0
+            for hrv in (body or {}).get('hrvSummaries') or []:
                 baseline = hrv.get('baseline') or {}
                 self._upsert('daily_hrv', {
-                    'calendar_date': hrv.get('calendar_date'),
-                    'weekly_avg': hrv.get('weekly_avg'),
-                    'last_night_avg': hrv.get('last_night_avg'),
-                    'last_night_5_min_high': hrv.get('last_night5_min_high'),
-                    'baseline_low_upper': baseline.get('low_upper'),
-                    'baseline_balanced_low': baseline.get('balanced_low'),
-                    'baseline_balanced_upper': baseline.get('balanced_upper'),
-                    'baseline_marker_value': baseline.get('marker_value'),
+                    'calendar_date': hrv.get('calendarDate'),
+                    'weekly_avg': hrv.get('weeklyAvg'),
+                    'last_night_avg': hrv.get('lastNightAvg'),
+                    'last_night_5_min_high': hrv.get('lastNight5MinHigh'),
+                    'baseline_low_upper': baseline.get('lowUpper'),
+                    'baseline_balanced_low': baseline.get('balancedLow'),
+                    'baseline_balanced_upper': baseline.get('balancedUpper'),
+                    'baseline_marker_value': baseline.get('markerValue'),
                     'status': hrv.get('status'),
-                    'feedback_phrase': hrv.get('feedback_phrase'),
+                    'feedback_phrase': hrv.get('feedbackPhrase'),
                 })
-                count += 1
-            print(f"  ✅ Daily HRV: {count} days synced")
-        except Exception as e:
-            print(f"  ⚠️ Daily HRV failed: {e}")
+                rows += 1
+            return rows
 
-    def _download_daily_hydration(self, start, end, days):
-        from typing import ClassVar
-        from pydantic.dataclasses import dataclass
-        from garth.stats._base import Stats
-
-        @dataclass
-        class DailyHydrationFixed(Stats):
-            value_in_ml: float | None
-            goal_in_ml: float | None
-            _path: ClassVar[str] = "/usersummary-service/stats/hydration/daily/{start}/{end}"
-            _page_size: ClassVar[int] = 28
-
-        print(f"  📊 Downloading daily hydration...")
-        try:
-            items = DailyHydrationFixed.list(end, period=days)
-            for item in items:
-                self._upsert('daily_hydration', {
-                    'calendar_date': str(item.calendar_date),
-                    'value_in_ml': item.value_in_ml,
-                    'goal_in_ml': item.goal_in_ml,
-                })
-            print(f"  ✅ Daily hydration: {len(items)} days synced")
-        except Exception as e:
-            print(f"  ⚠️ Daily hydration failed: {e}")
-
-    def _download_daily_intensity_minutes(self, start, end, days):
-        from typing import ClassVar
-        from pydantic.dataclasses import dataclass
-        from garth.stats._base import Stats
-
-        @dataclass
-        class DailyIntensityMinutesFixed(Stats):
-            weekly_goal: int | None
-            moderate_value: int | None = None
-            vigorous_value: int | None = None
-            _path: ClassVar[str] = "/usersummary-service/stats/im/daily/{start}/{end}"
-            _page_size: ClassVar[int] = 28
-
-        print(f"  📊 Downloading daily intensity minutes...")
-        try:
-            items = DailyIntensityMinutesFixed.list(end, period=days)
-            for item in items:
-                self._upsert('daily_intensity_minutes', {
-                    'calendar_date': str(item.calendar_date),
-                    'weekly_goal': item.weekly_goal,
-                    'moderate_value': item.moderate_value,
-                    'vigorous_value': item.vigorous_value,
-                })
-            print(f"  ✅ Daily intensity minutes: {len(items)} days synced")
-        except Exception as e:
-            print(f"  ⚠️ Daily intensity minutes failed: {e}")
-
-    # -- Garth Data methods (day-by-day) --
+        self._ranged("Daily HRV", start, end, fetch)
 
     def _download_sleep_data(self, start, end):
-        from garth.data import SleepData
         print(f"  📊 Downloading sleep data...")
-        def fetch(d):
-            sleep = SleepData.get(d)
-            if sleep is None:
-                return
-            dto = sleep.daily_sleep_dto
-            scores = dto.sleep_scores
-            self._upsert('daily_sleep', {
-                'calendar_date': str(dto.calendar_date),
-                'sleep_time_seconds': dto.sleep_time_seconds,
-                'nap_time_seconds': dto.nap_time_seconds,
-                'deep_sleep_seconds': dto.deep_sleep_seconds,
-                'light_sleep_seconds': dto.light_sleep_seconds,
-                'rem_sleep_seconds': dto.rem_sleep_seconds,
-                'awake_sleep_seconds': dto.awake_sleep_seconds,
-                'unmeasurable_sleep_seconds': dto.unmeasurable_sleep_seconds,
-                'sleep_start_timestamp_gmt': dto.sleep_start_timestamp_gmt,
-                'sleep_end_timestamp_gmt': dto.sleep_end_timestamp_gmt,
-                'sleep_start_timestamp_local': dto.sleep_start_timestamp_local,
-                'sleep_end_timestamp_local': dto.sleep_end_timestamp_local,
-                'device_rem_capable': dto.device_rem_capable,
-                'sleep_score_overall': scores.overall.value if scores and scores.overall else None,
-                'sleep_score_total_duration': scores.total_duration.value if scores and scores.total_duration else None,
-                'sleep_score_stress': scores.stress.value if scores and scores.stress else None,
-                'sleep_score_awake_count': scores.awake_count.value if scores and scores.awake_count else None,
-                'sleep_score_rem_percentage': scores.rem_percentage.value if scores and scores.rem_percentage else None,
-                'sleep_score_restlessness': scores.restlessness.value if scores and scores.restlessness else None,
-                'sleep_score_light_percentage': scores.light_percentage.value if scores and scores.light_percentage else None,
-                'sleep_score_deep_percentage': scores.deep_percentage.value if scores and scores.deep_percentage else None,
-                'average_spo2': dto.average_sp_o2_value,
-                'lowest_spo2': dto.lowest_sp_o2_value,
-                'highest_spo2': dto.highest_sp_o2_value,
-                'average_spo2_hr_sleep': dto.average_sp_o2_hr_sleep,
-                'average_respiration': dto.average_respiration_value,
-                'lowest_respiration': dto.lowest_respiration_value,
-                'highest_respiration': dto.highest_respiration_value,
-                'avg_sleep_stress': dto.avg_sleep_stress,
-                'sleep_score_feedback': dto.sleep_score_feedback,
-                'sleep_score_insight': dto.sleep_score_insight,
-            })
-        self._day_by_day("Sleep data", start, end, fetch)
 
-    def _download_body_composition(self, start, end, days):
+        def score(scores, key):
+            return (scores.get(key) or {}).get('value')
+
+        def fetch(chunk):
+            body = garmin_api.get('/sleep-service/sleep/dailySleepSummariesByDate',
+                                  params={'startDate': str(chunk[0]), 'endDate': str(chunk[1])})
+            rows = 0
+            for dto in body or []:
+                if not dto.get('calendarDate') or dto.get('sleepTimeSeconds') is None:
+                    continue
+                scores = dto.get('sleepScores') or {}
+                self._upsert('daily_sleep', {
+                    'calendar_date': dto.get('calendarDate'),
+                    'sleep_time_seconds': dto.get('sleepTimeSeconds'),
+                    'nap_time_seconds': dto.get('napTimeSeconds'),
+                    'deep_sleep_seconds': dto.get('deepSleepSeconds'),
+                    'light_sleep_seconds': dto.get('lightSleepSeconds'),
+                    'rem_sleep_seconds': dto.get('remSleepSeconds'),
+                    'awake_sleep_seconds': dto.get('awakeSleepSeconds'),
+                    'unmeasurable_sleep_seconds': dto.get('unmeasurableSleepSeconds'),
+                    'sleep_start_timestamp_gmt': dto.get('sleepStartTimestampGMT'),
+                    'sleep_end_timestamp_gmt': dto.get('sleepEndTimestampGMT'),
+                    'sleep_start_timestamp_local': dto.get('sleepStartTimestampLocal'),
+                    'sleep_end_timestamp_local': dto.get('sleepEndTimestampLocal'),
+                    'device_rem_capable': dto.get('deviceRemCapable'),
+                    'sleep_score_overall': score(scores, 'overall'),
+                    'sleep_score_total_duration': score(scores, 'totalDuration'),
+                    'sleep_score_stress': score(scores, 'stress'),
+                    'sleep_score_awake_count': score(scores, 'awakeCount'),
+                    'sleep_score_rem_percentage': score(scores, 'remPercentage'),
+                    'sleep_score_restlessness': score(scores, 'restlessness'),
+                    'sleep_score_light_percentage': score(scores, 'lightPercentage'),
+                    'sleep_score_deep_percentage': score(scores, 'deepPercentage'),
+                    'average_spo2': dto.get('averageSpO2Value'),
+                    'lowest_spo2': dto.get('lowestSpO2Value'),
+                    'highest_spo2': dto.get('highestSpO2Value'),
+                    'average_spo2_hr_sleep': dto.get('averageSpO2HRSleep'),
+                    'average_respiration': dto.get('averageRespirationValue'),
+                    'lowest_respiration': dto.get('lowestRespirationValue'),
+                    'highest_respiration': dto.get('highestRespirationValue'),
+                    'avg_sleep_stress': dto.get('avgSleepStress'),
+                    'sleep_score_feedback': dto.get('sleepScoreFeedback'),
+                    'sleep_score_insight': dto.get('sleepScoreInsight'),
+                })
+                rows += 1
+            return rows
+
+        self._ranged("Sleep data", start, end, fetch)
+
+    def _download_body_composition(self, start, end):
         print(f"  📊 Downloading body composition...")
-        try:
-            # Call the API directly — garth's WeightData requires timestamp_gmt
-            # to be a non-null int, but the API can return null for some entries.
-            data = garth.connectapi(
-                f"/weight-service/weight/range/{start}/{end}?includeAll=true"
-            )
-            summaries = data.get("dailyWeightSummaries", []) if data else []
-            count = 0
-            for summary in summaries:
-                for entry in summary.get("allWeightMetrics", []):
-                    if entry.get("timestampGMT") is None:
+
+        def fetch(chunk):
+            body = garmin_api.get(f'/weight-service/weight/range/{chunk[0]}/{chunk[1]}',
+                                  params={'includeAll': 'true'})
+            rows = 0
+            for summary in (body or {}).get('dailyWeightSummaries') or []:
+                for entry in summary.get('allWeightMetrics') or []:
+                    if entry.get('timestampGMT') is None:
                         continue  # skip entries with no timestamp
                     self._upsert('body_composition', {
                         'sample_pk': entry.get('samplePk'),
@@ -990,41 +845,21 @@ class GarminConnectDownloader:
                         'source_type': entry.get('sourceType'),
                         'timestamp_gmt': entry.get('timestampGMT'),
                     })
-                    count += 1
-            print(f"  ✅ Body composition: {count} entries synced")
-        except Exception as e:
-            print(f"  ⚠️ Body composition failed: {e}")
+                    rows += 1
+            return rows
 
-    def _download_body_battery(self, start, end):
-        from garth.data.body_battery import DailyBodyBatteryStress
-        print(f"  📊 Downloading body battery...")
-        def fetch(d):
-            data = DailyBodyBatteryStress.get(d)
-            if data is None:
-                return
-            self._upsert('daily_body_battery', {
-                'calendar_date': str(data.calendar_date),
-                'max_stress_level': data.max_stress_level,
-                'avg_stress_level': data.avg_stress_level,
-                'raw_json': json.dumps({
-                    'stress_chart_value_offset': data.stress_chart_value_offset,
-                    'stress_chart_y_axis_origin': data.stress_chart_y_axis_origin,
-                }),
-            })
-        self._day_by_day("Body battery", start, end, fetch)
+        self._ranged("Body composition", start, end, fetch, chunk_days=90, unit="entries")
 
-    # -- Garmin Connect API methods (day-by-day raw) --
+    # -- Day by day --
 
     def _download_heart_rate(self, start, end):
-        display_name = self._get_display_name()
         print(f"  📊 Downloading heart rate...")
         def fetch(d):
-            data = garth.connectapi(
-                f'/wellness-service/wellness/dailyHeartRate/{display_name}',
-                params={'date': str(d)}
-            )
-            if not data:
-                return
+            data = garmin_api.get('/wellness-service/wellness/dailyHeartRate',
+                                  params={'date': str(d)})
+            if not data or (data.get('restingHeartRate') is None
+                            and data.get('maxHeartRate') is None):
+                return False
             self._upsert('daily_heart_rate', {
                 'calendar_date': str(d),
                 'resting_heart_rate': data.get('restingHeartRate'),
@@ -1032,29 +867,18 @@ class GarminConnectDownloader:
                 'min_heart_rate': data.get('minHeartRate'),
                 'raw_json': json.dumps(data),
             })
+            return True
         self._day_by_day("Heart rate", start, end, fetch)
 
-    def _download_respiration(self, start, end):
-        print(f"  📊 Downloading respiration...")
-        def fetch(d):
-            data = garth.connectapi(f'/wellness-service/wellness/daily/respiration/{d}')
-            if not data:
-                return
-            self._upsert('daily_respiration', {
-                'calendar_date': str(d),
-                'avg_waking_respiration': data.get('avgWakingRespirationValue'),
-                'highest_respiration': data.get('highestRespirationValue'),
-                'lowest_respiration': data.get('lowestRespirationValue'),
-                'raw_json': json.dumps(data),
-            })
-        self._day_by_day("Respiration", start, end, fetch)
-
     def _download_spo2(self, start, end):
+        # The Personal API serves SpO2 as spo2acclimation; the plain
+        # /daily/spo2 path 404s. Same top-level fields.
         print(f"  📊 Downloading SpO2...")
         def fetch(d):
-            data = garth.connectapi(f'/wellness-service/wellness/daily/spo2/{d}')
-            if not data:
-                return
+            data = garmin_api.get(f'/wellness-service/wellness/daily/spo2acclimation/{d}')
+            if not data or (data.get('averageSpO2') is None
+                            and data.get('lowestSpO2') is None):
+                return False
             self._upsert('daily_spo2', {
                 'calendar_date': str(d),
                 'avg_spo2': data.get('averageSpO2'),
@@ -1062,177 +886,21 @@ class GarminConnectDownloader:
                 'latest_spo2': data.get('latestSpO2'),
                 'raw_json': json.dumps(data),
             })
+            return True
         self._day_by_day("SpO2", start, end, fetch)
-
-    def _download_floors(self, start, end):
-        print(f"  📊 Downloading floors...")
-        def fetch(d):
-            data = garth.connectapi(f'/wellness-service/wellness/floorsChartData/daily/{d}')
-            if not data:
-                return
-            # Floors endpoint returns a list of floor entries
-            total = sum(entry.get('floorsAscended', 0) for entry in data) if isinstance(data, list) else 0
-            goal = data[0].get('floorGoal') if isinstance(data, list) and data else None
-            self._upsert('daily_floors', {
-                'calendar_date': str(d),
-                'total_floors': total,
-                'floor_goal': goal,
-                'raw_json': json.dumps(data),
-            })
-        self._day_by_day("Floors", start, end, fetch)
-
-    def _download_training_readiness(self, start, end):
-        print(f"  📊 Downloading training readiness...")
-        def fetch(d):
-            data = garth.connectapi(f'/metrics-service/metrics/trainingreadiness/{d}')
-            if not data:
-                return
-            self._upsert('training_readiness', {
-                'calendar_date': str(d),
-                'score': data.get('score'),
-                'level': data.get('level'),
-                'raw_json': json.dumps(data),
-            })
-        self._day_by_day("Training readiness", start, end, fetch)
-
-    def _download_training_status(self, start, end):
-        print(f"  📊 Downloading training status...")
-        def fetch(d):
-            data = garth.connectapi(f'/metrics-service/metrics/trainingstatus/aggregated/{d}')
-            if not data:
-                return
-            self._upsert('training_status', {
-                'calendar_date': str(d),
-                'raw_json': json.dumps(data),
-            })
-        self._day_by_day("Training status", start, end, fetch)
-
-    def _download_max_metrics(self, start, end):
-        print(f"  📊 Downloading max metrics...")
-        def fetch(d):
-            data = garth.connectapi(f'/metrics-service/metrics/maxmet/daily/{d}/{d}')
-            if not data:
-                return
-            self._upsert('daily_max_metrics', {
-                'calendar_date': str(d),
-                'raw_json': json.dumps(data),
-            })
-        self._day_by_day("Max metrics", start, end, fetch)
 
     def _download_fitness_age(self, start, end):
         print(f"  📊 Downloading fitness age...")
         def fetch(d):
-            data = garth.connectapi(f'/fitnessage-service/fitnessage/{d}')
-            if not data:
-                return
+            data = garmin_api.get(f'/fitnessage-service/fitnessage/v2/{d}')
+            if not data or data.get('fitnessAge') is None:
+                return False
             self._upsert('fitness_age', {
                 'calendar_date': str(d),
                 'raw_json': json.dumps(data),
             })
+            return True
         self._day_by_day("Fitness age", start, end, fetch)
-
-    def _download_endurance_score(self, start, end):
-        print(f"  📊 Downloading endurance score...")
-        def fetch(d):
-            data = garth.connectapi(
-                '/metrics-service/metrics/endurancescore',
-                params={'calendarDate': str(d)}
-            )
-            if not data:
-                return
-            self._upsert('endurance_score', {
-                'calendar_date': str(d),
-                'raw_json': json.dumps(data),
-            })
-        self._day_by_day("Endurance score", start, end, fetch)
-
-    def _download_hill_score(self, start, end):
-        print(f"  📊 Downloading hill score...")
-        def fetch(d):
-            data = garth.connectapi(
-                '/metrics-service/metrics/hillscore',
-                params={'calendarDate': str(d)}
-            )
-            if not data:
-                return
-            self._upsert('hill_score', {
-                'calendar_date': str(d),
-                'raw_json': json.dumps(data),
-            })
-        self._day_by_day("Hill score", start, end, fetch)
-
-    def _download_race_predictions(self, start, end):
-        display_name = self._get_display_name()
-        print(f"  📊 Downloading race predictions...")
-        def fetch(d):
-            data = garth.connectapi(
-                f'/metrics-service/metrics/racepredictions/daily/{display_name}',
-                params={'fromCalendarDate': str(d), 'toCalendarDate': str(d)}
-            )
-            if not data:
-                return
-            self._upsert('race_predictions', {
-                'calendar_date': str(d),
-                'raw_json': json.dumps(data),
-            })
-        self._day_by_day("Race predictions", start, end, fetch)
-
-    def _download_blood_pressure(self, start, end):
-        print(f"  📊 Downloading blood pressure...")
-        try:
-            data = garth.connectapi(
-                f'/bloodpressure-service/bloodpressure/range/{start}/{end}',
-                params={'includeAll': 'true'}
-            )
-            if not data:
-                print(f"  ✅ Blood pressure: no data")
-                return
-            readings = data if isinstance(data, list) else data.get('measurementSummaries', [])
-            count = 0
-            conn = sqlite3.connect(self.db_path)
-            try:
-                for reading in readings:
-                    if isinstance(reading, dict):
-                        conn.execute(
-                            """INSERT OR IGNORE INTO blood_pressure
-                               (calendar_date, systolic, diastolic, pulse,
-                                timestamp_gmt, notes, source_type)
-                               VALUES (?, ?, ?, ?, ?, ?, ?)""",
-                            (
-                                reading.get('measurementTimestampLocal', '')[:10],
-                                reading.get('systolic'),
-                                reading.get('diastolic'),
-                                reading.get('pulse'),
-                                reading.get('measurementTimestampGMT'),
-                                reading.get('notes'),
-                                reading.get('sourceType'),
-                            )
-                        )
-                        count += 1
-                conn.commit()
-            finally:
-                conn.close()
-            print(f"  ✅ Blood pressure: {count} readings synced")
-        except Exception as e:
-            print(f"  ⚠️ Blood pressure failed: {e}")
-
-    def _download_devices(self):
-        print(f"  📊 Downloading devices...")
-        try:
-            data = garth.connectapi('/device-service/deviceregistration/devices')
-            if not data:
-                print(f"  ✅ Devices: no data")
-                return
-            for device in data:
-                self._upsert('devices', {
-                    'device_id': device.get('deviceId'),
-                    'device_name': device.get('displayName') or device.get('deviceName'),
-                    'device_type': device.get('deviceTypeName'),
-                    'raw_json': json.dumps(device),
-                })
-            print(f"  ✅ Devices: {len(data)} synced")
-        except Exception as e:
-            print(f"  ⚠️ Devices failed: {e}")
 
 
 def main():
@@ -1243,17 +911,14 @@ def main():
     args = parser.parse_args()
 
     print("🏃 Garmin Connect Activities Downloader")
-    print("Using garth authentication with MFA support")
+    print("Using the Garmin Personal API")
     print("=" * 50)
 
     try:
         downloader = GarminConnectDownloader()
 
         # Download activities
-        count = downloader.download_activities(
-            limit=int(os.getenv('GARMIN_LIMIT')),
-            days_back=args.days
-        )
+        count = downloader.download_activities(days_back=args.days)
 
         # Download health & wellness data
         downloader.download_health_data(days_back=args.days)

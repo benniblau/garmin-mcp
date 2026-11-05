@@ -53,7 +53,14 @@ pip install -r requirements.txt
 Create a `.env` file:
 
 ```env
-# Garmin Connect credentials
+# Reads (sync, FIT export): a Personal API key from
+# https://connect.garmin.com/app/settings/personalApiToken
+GARMIN_PERSONAL_API_KEY=your-key
+# Optional: the key's expiry, so /api/v1/upload/health can warn before it lapses
+GARMIN_PERSONAL_API_KEY_EXPIRES=2027-11-05
+
+# Writes only (FIT upload, activity privacy, challenges) — the Personal API is
+# read-only, so these still use a garth session
 GARMIN_EMAIL=your-email@example.com
 GARMIN_PASSWORD=your-password
 
@@ -164,6 +171,7 @@ so the CLI and the API cannot drift apart about what Garmin actually serves.
 which push activities into Garmin — [`fit-bridge`](https://github.com/benniblau/fit-bridge),
 principally — do not each carry their own copy of garth, their own session file
 and their own guesses about what Garmin's answer means. See `garmin_files.py`.
+Downloads use the Personal API key; uploads still need the garth session.
 
 The answer is 200 for anything Garmin actually decided, with the verdict in
 `status`:
@@ -339,7 +347,7 @@ garmin-mcp/
 ```
 
 ### Key Technologies
-- **Authentication** - [`garth`](https://github.com/matin/garth) for Garmin Connect API
+- **Authentication** - Garmin's Personal API key for reads; [`garth`](https://github.com/matin/garth) for the write paths
 - **Database** - SQLite with comprehensive indexing
 - **MCP Protocol** - Official Anthropic MCP SDK
 - **Async Processing** - Full async/await support for scalability

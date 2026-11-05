@@ -14,7 +14,7 @@ python3 -m venv .venv
 source .venv/bin/activate
 pip install -r requirements.txt
 
-# Download activities + health data from Garmin Connect (requires .env with GARMIN_EMAIL/GARMIN_PASSWORD)
+# Download activities + health data from Garmin Connect (requires .env with GARMIN_PERSONAL_API_KEY)
 python garmin_connect_downloader.py
 
 # Run MCP server locally (STDIO, used by Claude Desktop)
@@ -30,14 +30,40 @@ No test framework is configured. There are no lint or format commands.
 
 Two main components, both pure Python with no framework beyond the MCP SDK:
 
+### `garmin_api.py` — Every read goes through the Personal API
+- Garmin's Personal API (Oct 2026): a key from
+  https://connect.garmin.com/app/settings/personalApiToken, no password/MFA/session.
+  `GARMIN_PERSONAL_API_KEY` (`GARMIN_ACCESS_TOKEN` still read as a fallback).
+- The key is POSTed (`Authorization: ApiKey …`) to
+  `/personalapitoken-service/personal-api/personal-api-key/token` and comes back
+  as a **bare JWT in text/plain, not JSON**, valid 24 h, no refresh token.
+  Cached in-process until 5 min before `exp`; a 401 forces one re-exchange.
+- Host `personal.connectapi.garmin.com`, **same paths as connectapi** — but not all
+  of them. 404 on the Personal API: training readiness/status, max metrics, race
+  predictions, endurance/hill score, blood pressure, devices, `socialProfile`,
+  `/daily/respiration`, `/daily/spo2`, `floorsChartData`, `stats/im`, badge challenges.
+- Range caps: stress/steps/sleep summaries 400 past ~28–31 days; v2 daily
+  summaries fine at 6 months, 500 at a year. The activity list 500s for `limit` ≥ 500.
+- It is **read-only**. Writes (upload, privacy, challenge opt-in) stay on garth.
+- The key expires (30 d–1 y) and nothing Garmin returns says when;
+  `GARMIN_PERSONAL_API_KEY_EXPIRES=YYYY-MM-DD` makes `/upload/health` report days left.
+
 ### `garmin_connect_downloader.py` — Data Ingestion
-- `GarminConnectDownloader` class handles auth (via `garth` library with MFA/session persistence), API calls, and DB writes
-- Auth flow: tries resuming saved session from `GARTH_SESSION_PATH`, falls back to fresh login
-- `download_activities()` — activities from `/activitylist-service/activities/search/activities`
-- `download_health_data()` — all health/wellness data (sleep, stress, HRV, steps, hydration, body composition, heart rate, body battery, respiration, SpO2, floors, training readiness/status, blood pressure, max metrics, fitness age, race predictions, endurance/hill scores, devices)
-- Health data uses garth's Stats classes for bulk range queries (steps, stress, HRV, hydration, intensity minutes) and day-by-day iteration for detailed data (sleep, body battery) and raw API calls (heart rate, respiration, SpO2, etc.)
+- `GarminConnectDownloader` reads only through `garmin_api` — no garth here
+- `download_activities()` pages the activity list 200 at a time, passing the start date to Garmin
+- `download_health_data()`: v2 daily summaries (90-day chunks) feed steps, stress,
+  intensity minutes, floors, respiration, hydration and daily_body_battery; HRV,
+  sleep and body composition are range queries; heart rate, SpO2
+  (`spo2acclimation`) and fitness age (`v2`) are day-by-day, for the intraday
+  series kept in `raw_json`
+- Tables the Personal API cannot fill (training_readiness, training_status,
+  daily_max_metrics, race_predictions, endurance_score, hill_score,
+  blood_pressure, devices) keep their history and are no longer written
+- Wellness data stops at 2026-08-16: the user moved to a COROS watch and only
+  FIT files reach Garmin (via fit-bridge), so empty recent days are expected
+- A summary section that is empty writes nothing, rather than nulls over existing rows
 - Uses `INSERT OR REPLACE` upsert everywhere — calendar_date is the PK for health tables
-- Config via `.env`: `GARMIN_EMAIL`, `GARMIN_PASSWORD`, `DB_PATH`, `GARMIN_LIMIT`, `GARMIN_START_DATE`, `GARTH_SESSION_PATH`
+- Config via `.env`: `GARMIN_PERSONAL_API_KEY`, `DB_PATH`, `GARMIN_LIMIT`, `GARMIN_START_DATE`
 
 ### `mcp_server.py` — MCP Server
 - Uses Anthropic's `mcp` SDK with dual transport: STDIO (default, for local Claude Desktop) and Streamable HTTP (for remote clients, with bearer token auth)
@@ -50,7 +76,10 @@ Two main components, both pure Python with no framework beyond the MCP SDK:
 - `deploy/garmin-mcp.service` — systemd unit for production deployment on Linux VPS
 
 ### `garmin_files.py` — Moving activity files in and out
-- Owns the Garmin session (`authenticate()`), so a server importing it never
+- Reads (`fetch_activity_file`, `find_activity_by_start`) use the Personal API key;
+  writes (`upload_fit`, `set_privacy`) and `garmin_challenges` use the garth session
+  (`GARMIN_EMAIL`, `GARMIN_PASSWORD`, `GARTH_SESSION_PATH`)
+- Owns the garth session (`authenticate()`), so a server importing it never
   inherits a CLI's `sys.exit`: a missing credential fails one request rather
   than taking the process down. `export_fit.py` delegates here and adds the
   exit itself.
@@ -103,7 +132,9 @@ Carries only what MCP cannot — binary files and the one write path:
 `/health` (unauthenticated), `/activities/{id}/file`, `/upload/health`,
 `/upload/fit`. `/upload/health` is separate from `/health` because it costs a
 session probe and needs credentials, whereas `/health` must stay cheap enough
-to poll; callers use it as a batch preflight.
+to poll; callers use it as a batch preflight. It reports both ways in: the
+garth session decides the status, the Personal API key and its expiry ride
+alongside. `/health` only says whether a key is configured.
 
 ### Database
 - SQLite with `activities` table (~90 columns) + 21 health/wellness tables
